@@ -48,7 +48,7 @@ This repo includes:
 Start command:
 
 ```txt
-gunicorn --chdir backend app:app
+gunicorn --chdir backend app:app --bind 0.0.0.0:$PORT
 ```
 
 ### Local production-like run
@@ -57,7 +57,7 @@ gunicorn --chdir backend app:app
 pip install -r requirements.txt
 set MONGODB_URI=your_mongodb_uri
 set JWT_SECRET_KEY=your_secret
-gunicorn --chdir backend app:app
+gunicorn --chdir backend app:app --bind 0.0.0.0:5000
 ```
 
 ### Tracker note

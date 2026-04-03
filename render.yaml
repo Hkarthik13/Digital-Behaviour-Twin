@@ -3,5 +3,5 @@ services:
     name: digital-behaviour-twin
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --chdir backend app:app
+    startCommand: gunicorn --chdir backend app:app --bind 0.0.0.0:$PORT
     autoDeploy: true
