@@ -1,0 +1,7 @@
+user_id,date,day_of_week,total_productive_time,total_distracting_time,focus_score,peak_productive_hour,session_avg,behaviour_cluster
+test_user_1,2026-01-31,Saturday,41,0,1.0,21,41.0,2
+test_user_1,2026-02-01,Sunday,217,301,0.42,8,27.26,0
+test_user_1,2026-02-02,Monday,191,317,0.38,7,28.22,0
+test_user_1,2026-02-03,Tuesday,151,472,0.24,23,29.67,0
+test_user_1,2026-02-04,Wednesday,424,447,0.49,19,37.87,1
+test_user_1,2026-02-05,Thursday,457,149,0.75,12,33.67,1

@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Digital Behaviour Twin Dashboard</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f4f6f8;
+      padding: 30px;
+    }
+
+    h2 {
+      text-align: center;
+    }
+
+    button {
+      display: block;
+      margin: 20px auto;
+      padding: 10px 20px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+
+    .card {
+      max-width: 500px;
+      margin: 20px auto;
+      background: #fff;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+
+    .card p {
+      font-size: 16px;
+      margin: 10px 0;
+    }
+
+    .productive {
+      color: green;
+      font-weight: bold;
+    }
+
+    .distracting {
+      color: red;
+      font-weight: bold;
+    }
+
+    .recommendation {
+      background: #eef;
+      padding: 10px;
+      border-radius: 5px;
+      margin-top: 15px;
+    }
+  </style>
+</head>
+<body>
+
+<h2>Digital Behaviour Twin Dashboard</h2>
+
+<button onclick="loadTwin()">Load My Behaviour Twin</button>
+
+<div id="output"></div>
+
+<script>
+function loadTwin() {
+  const token = localStorage.getItem("token");
+
+  if (!token) {
+    alert("Session expired. Please login again.");
+    window.location.href = "login.html";
+    return;
+  }
+
+  fetch("http://127.0.0.1:5000/twin/recommendation", {
+    headers: {
+      "Authorization": "Bearer " + token
+    }
+  })
+  .then(res => {
+    if (!res.ok) throw new Error("Unauthorized");
+    return res.json();
+  })
+  .then(data => {
+    document.getElementById("output").innerHTML = `
+      <div class="card">
+        <p><strong>Email:</strong> ${data.email}</p>
+        <p class="productive">🟢 Productive Time: ${data.productive_time} mins</p>
+        <p class="distracting">🔴 Distracting Time: ${data.distracting_time} mins</p>
+
+        <div class="recommendation">
+          💡 <strong>AI Recommendation:</strong><br>
+          ${data.recommendation}
+        </div>
+      </div>
+    `;
+  })
+  .catch(err => {
+    localStorage.removeItem("token");
+    document.getElementById("output").innerHTML =
+      "<p style='color:red; text-align:center;'>Session expired. Please login again.</p>";
+    console.error(err);
+  });
+}
+</script>
+
+</body>
+</html>

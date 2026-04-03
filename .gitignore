@@ -1,0 +1,9 @@
+.env
+backend/.env
+.venv/
+backend/.venv/
+__pycache__/
+*.pyc
+tracker/token.json
+tracker/device_id.txt
+backend/.jwt_secret
