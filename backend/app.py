@@ -21,6 +21,7 @@ from flask_jwt_extended import (
 from datetime import timedelta, datetime
 from functools import wraps
 from dotenv import load_dotenv
+from zoneinfo import ZoneInfo
 
 load_dotenv()
 
@@ -47,6 +48,12 @@ TRACKER_TOKEN_FILE = os.path.normpath(os.path.join(BASE_DIR, "..", "tracker", "t
 LEGACY_ACTIVE_TOKEN_FILE = os.path.join(BASE_DIR, "active_token.txt")
 JWT_SECRET_FILE = os.path.join(BASE_DIR, ".jwt_secret")
 DEFAULT_JWT_SECRET_PLACEHOLDER = "replace-me-with-a-strong-local-secret"
+UTC_TZ = ZoneInfo("UTC")
+APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Asia/Kolkata").strip() or "Asia/Kolkata"
+try:
+    APP_TZ = ZoneInfo(APP_TIMEZONE)
+except Exception:
+    APP_TZ = UTC_TZ
 
 
 def get_admin_emails():
@@ -56,6 +63,31 @@ def get_admin_emails():
 
 def is_admin_email(email: str) -> bool:
     return (email or "").strip().lower() in get_admin_emails()
+
+
+def as_local_time(dt_value):
+    if not isinstance(dt_value, datetime):
+        return dt_value
+    if dt_value.tzinfo is None:
+        dt_value = dt_value.replace(tzinfo=UTC_TZ)
+    return dt_value.astimezone(APP_TZ)
+
+
+def format_local_time(dt_value, fmt="%Y-%m-%d %H:%M:%S"):
+    local_dt = as_local_time(dt_value)
+    if not isinstance(local_dt, datetime):
+        return None
+    return local_dt.strftime(fmt)
+
+
+def local_now():
+    return datetime.now(UTC_TZ).astimezone(APP_TZ)
+
+
+def local_day_start_utc_naive(reference_dt=None):
+    local_dt = as_local_time(reference_dt) if reference_dt else local_now()
+    start_local = local_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start_local.astimezone(UTC_TZ).replace(tzinfo=None)
 
 
 def admin_required(fn):
@@ -672,7 +704,7 @@ def device_heartbeat():
     db["device_notifications"].update_many(
         {"email": email, "device_id": device_id, "delivered": False},
         {"$set": {"delivered": True}})
-    return jsonify({"status": "ok", "server_time": now.isoformat(),
+    return jsonify({"status": "ok", "server_time": local_now().isoformat(),
                     "pending_notifications": pending})
 
 
@@ -681,11 +713,11 @@ def device_heartbeat():
 def list_devices():
     email = get_jwt_identity()
     device_list = list(devices.find({"email": email}, {"_id": 0}))
+    today = local_day_start_utc_naive()
     for d in device_list:
         for key in ["registered_at", "last_heartbeat", "last_seen"]:
             if key in d and isinstance(d[key], datetime):
-                d[key] = d[key].strftime("%Y-%m-%d %H:%M:%S")
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                d[key] = format_local_time(d[key], "%Y-%m-%d %H:%M:%S")
         today_logs = list(activities.find({"email": email,
                                            "device_id": d.get("device_id"),
                                            "timestamp": {"$gte": today}}))
@@ -731,7 +763,7 @@ def rename_device():
 @jwt_required()
 def sync_summary():
     email = get_jwt_identity()
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = local_day_start_utc_naive()
     device_list = list(devices.find({"email": email}, {"_id": 0}))
     all_logs    = list(activities.find({"email": email, "timestamp": {"$gte": today}}))
     total_productive  = sum(l["duration"] for l in all_logs if l["type"] == "productive")
@@ -759,7 +791,7 @@ def sync_summary():
     online_count = sum(1 for d in device_list if d.get("is_online"))
     return jsonify({"total_productive": total_productive, "total_distracting": total_distracting,
                     "online_devices": online_count, "total_devices": len(device_list),
-                    "device_stats": device_stats, "last_sync": datetime.now().strftime("%H:%M:%S")})
+                    "device_stats": device_stats, "last_sync": local_now().strftime("%H:%M:%S")})
 
 
 @app.route("/devices/sync-status", methods=["GET"])
@@ -769,7 +801,7 @@ def sync_status():
     total  = devices.count_documents({"email": email})
     online = devices.count_documents({"email": email, "is_online": True})
     last_ev = sync_events.find_one({"email": email}, sort=[("timestamp", -1)])
-    last_t  = last_ev["timestamp"].strftime("%H:%M:%S") if last_ev else "Never"
+    last_t  = format_local_time(last_ev["timestamp"], "%H:%M:%S") if last_ev else "Never"
     return jsonify({"online_devices": online, "total_devices": total,
                     "last_sync": last_t, "synced": online > 0})
 
@@ -1120,7 +1152,7 @@ def admin_summary():
     new_users = users.count_documents({"is_new_user": True})
     consented_users = users.count_documents({"consent_given": True})
     online_devices = devices.count_documents({"is_online": True})
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = local_day_start_utc_naive()
     today_logs = activities.count_documents({"timestamp": {"$gte": today}})
     return jsonify({
         "total_users": total_users,
@@ -1153,13 +1185,13 @@ def admin_users_list():
             "is_active": user.get("is_active", True),
             "is_new_user": user.get("is_new_user", False),
             "consent_given": user.get("consent_given", False),
-            "registered_at": user.get("registered_at").strftime("%Y-%m-%d %H:%M") if isinstance(user.get("registered_at"), datetime) else None,
-            "consent_accepted_at": user.get("consent_accepted_at").strftime("%Y-%m-%d %H:%M") if isinstance(user.get("consent_accepted_at"), datetime) else None,
+            "registered_at": format_local_time(user.get("registered_at"), "%Y-%m-%d %H:%M") if isinstance(user.get("registered_at"), datetime) else None,
+            "consent_accepted_at": format_local_time(user.get("consent_accepted_at"), "%Y-%m-%d %H:%M") if isinstance(user.get("consent_accepted_at"), datetime) else None,
             "device_count": len(user_devices),
             "online_devices": sum(1 for d in user_devices if d.get("is_online")),
             "productive_minutes": round((twin_data.get("productive_time", 0) or 0) / 60),
             "distracting_minutes": round((twin_data.get("distracting_time", 0) or 0) / 60),
-            "last_activity": last_activity["timestamp"].strftime("%Y-%m-%d %H:%M") if last_activity and isinstance(last_activity.get("timestamp"), datetime) else None,
+            "last_activity": format_local_time(last_activity["timestamp"], "%Y-%m-%d %H:%M") if last_activity and isinstance(last_activity.get("timestamp"), datetime) else None,
         })
     return jsonify({"users": result})
 
@@ -1835,7 +1867,8 @@ def streak_summary():
 @jwt_required()
 def get_alerts():
     alert_list = list(alerts.find({"email": get_jwt_identity()}, {"_id": 0}).sort("timestamp", -1).limit(20))
-    for a in alert_list: a["timestamp"] = a["timestamp"].strftime("%Y-%m-%d %H:%M")
+    for a in alert_list:
+        a["timestamp"] = format_local_time(a["timestamp"], "%Y-%m-%d %H:%M")
     return jsonify(alert_list)
 
 @app.route("/twin/heatmap")
@@ -1859,7 +1892,7 @@ def behaviour_heatmap():
 @jwt_required()
 def focus_timeline():
     logs = list(ml_states.find({"email": get_jwt_identity()}, {"_id": 0}).sort("last_updated", 1))
-    return jsonify([{"time": l["last_updated"].strftime("%H:%M"), "score": l["predicted_score"]} for l in logs])
+    return jsonify([{"time": format_local_time(l["last_updated"], "%H:%M"), "score": l["predicted_score"]} for l in logs])
 
 @app.route("/twin/weekly-report", methods=["GET"])
 @jwt_required()

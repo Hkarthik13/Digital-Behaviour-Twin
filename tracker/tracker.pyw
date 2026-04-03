@@ -10,6 +10,7 @@ import requests
 import atexit
 import base64
 from datetime import datetime, timedelta
+from tkinter import messagebox
 
 import pytesseract
 from dotenv import load_dotenv
@@ -32,6 +33,8 @@ auth_state = {
     "access_expires_at": None,
     "refresh_token": None,
 }
+auth_prompt_lock = threading.Lock()
+auth_prompt_state = {"active": False}
 
 DEVICE_ID_FILE = "device_id.txt"
 
@@ -80,6 +83,19 @@ def _load_refresh_token_from_disk():
         return None
 
 
+def _save_auth_state(refresh_token: str, email: str = ""):
+    try:
+        payload = {
+            "refresh_token": refresh_token,
+            "email": (email or "").strip().lower(),
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        with open(AUTH_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+    except Exception as e:
+        print(f"[Auth] Could not save auth state: {e}")
+
+
 def _clear_auth_state():
     auth_state["access_token"] = None
     auth_state["access_expires_at"] = None
@@ -97,6 +113,257 @@ def _set_access_token(token: str):
     auth_state["access_expires_at"] = _decode_jwt_exp(token)
 
 
+def _show_tracker_login_window():
+    result = {"email": None, "password": None}
+
+    root = tk.Tk()
+    root.title("Digital Twin Tracker Login")
+    root.geometry("520x430")
+    root.resizable(False, False)
+    root.configure(bg="#08111f")
+    root.attributes("-topmost", True)
+    root.update_idletasks()
+    x = (root.winfo_screenwidth() - 520) // 2
+    y = (root.winfo_screenheight() - 430) // 2
+    root.geometry(f"520x430+{x}+{y}")
+
+    shell = tk.Frame(root, bg="#08111f")
+    shell.pack(fill="both", expand=True, padx=18, pady=18)
+
+    card = tk.Frame(shell, bg="#0f172a", highlightbackground="#1e293b", highlightthickness=1)
+    card.pack(fill="both", expand=True)
+
+    hero = tk.Frame(card, bg="#14b8a6", height=88)
+    hero.pack(fill="x")
+    hero.pack_propagate(False)
+
+    tk.Label(
+        hero,
+        text="Digital Behaviour Twin",
+        font=("Arial", 12, "bold"),
+        bg="#14b8a6",
+        fg="#06202a",
+    ).pack(anchor="w", padx=22, pady=(16, 2))
+
+    tk.Label(
+        hero,
+        text="Tracker sign in",
+        font=("Arial", 22, "bold"),
+        bg="#14b8a6",
+        fg="#ffffff",
+    ).pack(anchor="w", padx=22)
+
+    content = tk.Frame(card, bg="#0f172a")
+    content.pack(fill="both", expand=True, padx=24, pady=20)
+
+    tk.Label(
+        content,
+        text="Sign in with the same account you use in the web dashboard.",
+        font=("Arial", 10),
+        bg="#0f172a",
+        fg="#cbd5e1",
+        wraplength=440,
+        justify="left",
+    ).pack(anchor="w")
+
+    tk.Label(
+        content,
+        text=f"Connected server: {BASE_URL}",
+        font=("Arial", 9),
+        bg="#0f172a",
+        fg="#67e8f9",
+        wraplength=440,
+        justify="left",
+    ).pack(anchor="w", pady=(8, 16))
+
+    features = tk.Frame(content, bg="#111c2f")
+    features.pack(fill="x", pady=(0, 18))
+    for bullet in (
+        "Auto syncs app activity to your live dashboard",
+        "Keeps this device linked to your account",
+        "Stores the tracker session locally on this laptop",
+    ):
+        tk.Label(
+            features,
+            text=f"  {bullet}",
+            font=("Arial", 9),
+            bg="#111c2f",
+            fg="#dbeafe",
+            anchor="w",
+            padx=10,
+            pady=4,
+        ).pack(fill="x")
+
+    form = tk.Frame(content, bg="#0f172a")
+    form.pack(fill="x")
+
+    tk.Label(form, text="Email address", font=("Arial", 10, "bold"), bg="#0f172a", fg="#e2e8f0").pack(anchor="w")
+    email_entry = tk.Entry(
+        form,
+        font=("Arial", 11),
+        relief="flat",
+        bg="#f8fafc",
+        fg="#0f172a",
+        insertbackground="#0f172a",
+    )
+    email_entry.pack(fill="x", pady=(6, 12), ipady=7)
+
+    tk.Label(form, text="Password", font=("Arial", 10, "bold"), bg="#0f172a", fg="#e2e8f0").pack(anchor="w")
+    password_entry = tk.Entry(
+        form,
+        font=("Arial", 11),
+        show="*",
+        relief="flat",
+        bg="#f8fafc",
+        fg="#0f172a",
+        insertbackground="#0f172a",
+    )
+    password_entry.pack(fill="x", pady=(6, 8), ipady=7)
+
+    show_password = tk.BooleanVar(value=False)
+
+    def toggle_password():
+        password_entry.config(show="" if show_password.get() else "*")
+
+    tk.Checkbutton(
+        form,
+        text="Show password",
+        variable=show_password,
+        command=toggle_password,
+        font=("Arial", 9),
+        bg="#0f172a",
+        fg="#cbd5e1",
+        activebackground="#0f172a",
+        activeforeground="#ffffff",
+        selectcolor="#0f172a",
+    ).pack(anchor="w", pady=(0, 8))
+
+    status_label = tk.Label(
+        content,
+        text="",
+        font=("Arial", 9),
+        bg="#0f172a",
+        fg="#fca5a5",
+        wraplength=440,
+        justify="left",
+    )
+    status_label.pack(anchor="w", pady=(2, 10))
+
+    def submit():
+        email = email_entry.get().strip().lower()
+        password = password_entry.get()
+        if not email or not password:
+            status_label.config(text="Email and password both required.")
+            return
+        result["email"] = email
+        result["password"] = password
+        root.destroy()
+
+    def cancel():
+        root.destroy()
+
+    button_row = tk.Frame(content, bg="#0f172a")
+    button_row.pack(fill="x", pady=(6, 0))
+
+    tk.Button(
+        button_row,
+        text="Connect tracker",
+        command=submit,
+        bg="#10b981",
+        fg="white",
+        activebackground="#059669",
+        activeforeground="white",
+        font=("Arial", 11, "bold"),
+        padx=18,
+        pady=8,
+        cursor="hand2",
+        relief="flat",
+    ).pack(side="left")
+
+    tk.Button(
+        button_row,
+        text="Cancel",
+        command=cancel,
+        bg="#334155",
+        fg="white",
+        activebackground="#475569",
+        activeforeground="white",
+        font=("Arial", 10, "bold"),
+        padx=18,
+        pady=8,
+        cursor="hand2",
+        relief="flat",
+    ).pack(side="right")
+
+    email_entry.focus_set()
+    root.bind("<Return>", lambda event: submit())
+    root.protocol("WM_DELETE_WINDOW", cancel)
+    root.mainloop()
+    return result
+
+
+def _prompt_tracker_login():
+    with auth_prompt_lock:
+        if _load_refresh_token_from_disk():
+            return True
+        if auth_prompt_state["active"]:
+            return False
+        auth_prompt_state["active"] = True
+
+    try:
+        while True:
+            creds = _show_tracker_login_window()
+            email = (creds.get("email") or "").strip().lower()
+            password = creds.get("password") or ""
+            if not email or not password:
+                print("[Auth] Tracker login cancelled. Waiting before retry...")
+                create_tray_window._last_sync = "Login cancelled"
+                return False
+
+            try:
+                response = requests.post(
+                    f"{BASE_URL}/auth/login",
+                    json={"email": email, "password": password},
+                    headers={"Content-Type": "application/json"},
+                    timeout=15,
+                )
+            except Exception as e:
+                print(f"[Auth] Tracker login request failed: {e}")
+                messagebox.showerror("Tracker Login Failed", f"Could not reach server.\n\n{e}")
+                create_tray_window._last_sync = "Login failed"
+                continue
+
+            try:
+                data = response.json()
+            except Exception:
+                data = {}
+
+            if response.status_code == 200:
+                access_token = data.get("access_token")
+                refresh_token = data.get("refresh_token")
+                if not access_token or not refresh_token:
+                    messagebox.showerror(
+                        "Tracker Login Failed",
+                        "Server response did not include the required login tokens.",
+                    )
+                    create_tray_window._last_sync = "Login failed"
+                    continue
+                _save_auth_state(refresh_token, email)
+                auth_state["refresh_token"] = refresh_token
+                _set_access_token(access_token)
+                create_tray_window._last_sync = "Tracker connected"
+                print(f"[Auth] Tracker login successful for {email}")
+                return True
+
+            error_msg = data.get("msg") or f"Login failed with status {response.status_code}"
+            print(f"[Auth] Tracker login rejected: {error_msg}")
+            messagebox.showerror("Tracker Login Failed", error_msg)
+            create_tray_window._last_sync = "Login rejected"
+    finally:
+        with auth_prompt_lock:
+            auth_prompt_state["active"] = False
+
+
 def get_valid_access_token(force_refresh: bool = False):
     now = datetime.now()
     current_token = auth_state.get("access_token")
@@ -109,6 +376,12 @@ def get_valid_access_token(force_refresh: bool = False):
     if not refresh_token:
         auth_state["access_token"] = None
         auth_state["access_expires_at"] = None
+        if not force_refresh:
+            _prompt_tracker_login()
+            refresh_token = _load_refresh_token_from_disk()
+            auth_state["refresh_token"] = refresh_token
+            if refresh_token:
+                return get_valid_access_token(force_refresh=True)
         return None
 
     try:
@@ -123,8 +396,10 @@ def get_valid_access_token(force_refresh: bool = False):
                 _set_access_token(access_token)
                 return access_token
         elif response.status_code in [401, 422]:
-            print("[Auth] Refresh token invalid or expired. Waiting for a fresh login...")
+            print("[Auth] Refresh token invalid or expired. Opening tracker login...")
             _clear_auth_state()
+            if not force_refresh:
+                _prompt_tracker_login()
             return None
         else:
             print(f"[Auth] Refresh failed with status {response.status_code}")
@@ -882,9 +1157,10 @@ if __name__ == "__main__":
     except: pass
     wa_configured = bool(os.getenv("TELEGRAM_CHAT_ID") and os.getenv("TELEGRAM_BOT_TOKEN"))
     print(f"   Telegram alerts: {'✅ Configured' if wa_configured else '❌ Not configured (.env missing)'}")
-    print("   Waiting for user to login on dashboard...\n")
+    print(f"   API Base URL: {BASE_URL}")
+    print("   Tracker will open its own login window if needed.\n")
 
-    create_tray_window._last_sync = "⏳ Waiting for login..."
+    create_tray_window._last_sync = "⏳ Waiting for tracker login..."
 
     tray_thread = threading.Thread(target=create_tray_window, daemon=True)
     tray_thread.start()
