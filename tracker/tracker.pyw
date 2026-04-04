@@ -67,6 +67,7 @@ app_classification_state = {
 distraction_watch_state = {
     "active_since": None,
     "last_alert_at": None,
+    "warning_issued": False,
     "penalty_lock_triggered": False,
 }
 FALLBACK_DISTRACTING_KEYWORDS = [
@@ -758,6 +759,16 @@ def force_close_window(hwnd, pid, title: str):
         print(f"[AppBlock] taskkill failed for '{title[:60]}': {e}")
 
 
+def close_window_soft(hwnd, title: str):
+    try:
+        import win32con
+        import win32gui
+        win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+    except Exception as e:
+        print(f"[AppBlock] Soft close failed for '{title[:60]}': {e}")
+
+
 def enforce_focus_lock_process_block():
     grace = blocker_state.get("grace_until")
     if blocker_state.get("grace_active") or (grace and datetime.now() < grace):
@@ -806,9 +817,22 @@ def enforce_focus_lock_app_block(token: str):
         return
 
     process_name = get_process_image_name(pid)
-    if process_name in SAFE_BROWSER_PROCESS_NAMES:
-        return
     title_class = classify_window_title(title)
+    if process_name in SAFE_BROWSER_PROCESS_NAMES:
+        if blocker_state.get("focus_lock_reason") != "distraction_penalty" or title_class != "distracting":
+            return
+        now = datetime.now()
+        if (
+            app_classification_state.get("last_blocked_title") == title
+            and app_classification_state.get("last_blocked_at")
+            and (now - app_classification_state["last_blocked_at"]).total_seconds() < 4
+        ):
+            return
+        close_window_soft(hwnd, title)
+        app_classification_state["last_blocked_title"] = title
+        app_classification_state["last_blocked_at"] = now
+        print(f"[AppBlock] Penalty lock closed distracting browser window: {title[:80]}")
+        return
     process_class = classify_process_name(process_name)
     if title_class != "distracting" and process_class != "distracting":
         return
@@ -1327,10 +1351,9 @@ def maybe_trigger_local_distraction_alert(activity_type: str, duration_seconds: 
         if distraction_watch_state["active_since"] is None:
             distraction_watch_state["active_since"] = now - timedelta(seconds=duration_seconds)
         minutes = (now - distraction_watch_state["active_since"]).total_seconds() / 60
-        last_alert_at = distraction_watch_state.get("last_alert_at")
-        can_alert = not last_alert_at or (now - last_alert_at).total_seconds() >= 300
-        if minutes >= 20 and can_alert:
+        if minutes >= 20 and not distraction_watch_state.get("warning_issued"):
             distraction_watch_state["last_alert_at"] = now
+            distraction_watch_state["warning_issued"] = True
             msg = (
                 f"Continuous distraction detected for {int(minutes)} minutes.\n\n"
                 "Close distracting apps/websites and get back to focus mode."
@@ -1344,6 +1367,7 @@ def maybe_trigger_local_distraction_alert(activity_type: str, duration_seconds: 
             )
     else:
         distraction_watch_state["active_since"] = None
+        distraction_watch_state["warning_issued"] = False
         distraction_watch_state["penalty_lock_triggered"] = False
 
 
@@ -1375,16 +1399,6 @@ def maybe_trigger_distraction_penalty_lock(token: str, activity_type: str, durat
         if response is not None and response.status_code == 200:
             distraction_watch_state["penalty_lock_triggered"] = True
             print("[Blocker] 30-minute distraction penalty lock activated.")
-            threading.Thread(
-                target=show_attractive_alert,
-                args=("Distracting apps/sites continued after the warning.\n\nBlocked for 30 minutes.",),
-                daemon=True,
-            ).start()
-            send_whatsapp_tracker_async(
-                "*Penalty Block Activated*\n\n"
-                "You continued distracting usage after the warning.\n"
-                "Distracting sites are now blocked for 30 minutes."
-            )
             refresh_and_enforce_blocker(token, 0, force_fetch=True)
     except Exception as e:
         print(f"[Blocker] Penalty lock activation failed: {e}")
