@@ -1490,7 +1490,8 @@ def weekly_summary():
         day_start = start_of_week + timedelta(days=i)
         day_end   = day_start + timedelta(days=1)
         logs = list(activities.find({"email": email, "timestamp": {"$gte": day_start, "$lt": day_end}}))
-        data.append(sum(log["duration"] for log in logs if log["type"] == "productive"))
+        productive_seconds = sum(log["duration"] for log in logs if log["type"] == "productive")
+        data.append(round(productive_seconds / 60, 2))
     return jsonify({"weekly_productive_minutes": data})
 
 @app.route("/twin/weekly-data")
