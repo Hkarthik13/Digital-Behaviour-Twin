@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime
 from typing import Any
 
 from pymongo import MongoClient
@@ -29,7 +30,11 @@ def main() -> None:
         description="Merge legacy activity_logs documents into the current activities collection."
     )
     parser.add_argument("--mongo-uri", default="mongodb://localhost:27017/")
+    parser.add_argument("--source-mongo-uri", help="Optional source Mongo URI. Defaults to --mongo-uri.")
+    parser.add_argument("--target-mongo-uri", help="Optional target Mongo URI. Defaults to --mongo-uri.")
     parser.add_argument("--db-name", default="digital_behaviour_twin")
+    parser.add_argument("--source-db-name", help="Optional source DB name. Defaults to --db-name.")
+    parser.add_argument("--target-db-name", help="Optional target DB name. Defaults to --db-name.")
     parser.add_argument("--source-collection", default="activity_logs")
     parser.add_argument("--target-collection", default="activities")
     parser.add_argument("--source-user-id", help="Optional legacy user_id filter.")
@@ -44,12 +49,19 @@ def main() -> None:
         action="store_true",
         help="Actually write missing documents. Without this flag the script only shows a dry run.",
     )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Rebuild behaviour_twin, risk_scores, and ml_states after merge.",
+    )
     args = parser.parse_args()
 
-    client = MongoClient(args.mongo_uri)
-    db = client[args.db_name]
-    source_collection = db[args.source_collection]
-    target_collection = db[args.target_collection]
+    source_client = MongoClient(args.source_mongo_uri or args.mongo_uri)
+    target_client = MongoClient(args.target_mongo_uri or args.mongo_uri)
+    source_db = source_client[args.source_db_name or args.db_name]
+    target_db = target_client[args.target_db_name or args.db_name]
+    source_collection = source_db[args.source_collection]
+    target_collection = target_db[args.target_collection]
 
     query: dict[str, Any] = {}
     if args.source_user_id:
@@ -109,6 +121,47 @@ def main() -> None:
 
     result = target_collection.insert_many(pending_docs, ordered=False)
     print(f"Inserted documents   : {len(result.inserted_ids)}")
+
+    if args.rebuild:
+        all_logs = list(target_collection.find({"email": args.target_email}, {"_id": 0, "type": 1, "duration": 1}))
+        productive = sum(max(int(log.get("duration") or 0), 0) for log in all_logs if log.get("type") == "productive")
+        distracting = sum(max(int(log.get("duration") or 0), 0) for log in all_logs if log.get("type") == "distracting")
+        total = productive + distracting
+        focus_score = round((productive / total) * 100) if total > 0 else 0
+        risk = round((distracting / total) * 100) if total > 0 else 0
+        now = datetime.now()
+
+        target_db["behaviour_twin"].update_one(
+            {"email": args.target_email},
+            {"$set": {
+                "email": args.target_email,
+                "productive_time": productive,
+                "distracting_time": distracting,
+                "last_updated": now,
+            }},
+            upsert=True,
+        )
+        target_db["risk_scores"].update_one(
+            {"email": args.target_email},
+            {"$set": {
+                "email": args.target_email,
+                "risk_score": risk,
+                "last_updated": now,
+            }},
+            upsert=True,
+        )
+        target_db["ml_states"].update_one(
+            {"email": args.target_email},
+            {"$set": {
+                "email": args.target_email,
+                "focus_level": "Highly Productive" if focus_score >= 75 else "Balanced" if focus_score >= 45 else "Highly Distracted",
+                "predicted_score": focus_score,
+                "predicted_focus_score": focus_score,
+                "last_updated": now,
+            }},
+            upsert=True,
+        )
+        print("Rebuilt aggregate collections after merge.")
 
 
 if __name__ == "__main__":
