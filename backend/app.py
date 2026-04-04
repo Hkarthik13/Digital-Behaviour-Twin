@@ -2207,7 +2207,10 @@ def blocker_status():
     risk      = risk_doc.get("risk_score", 0)
     threshold = doc.get("risk_threshold", 70)
     focus_lock_until = parse_local_datetime_string(doc.get("focus_lock_until"))
-    focus_lock_active = bool(focus_lock_until and local_now() < focus_lock_until)
+    grace_until = parse_local_datetime_string(doc.get("grace_until"))
+    grace_active = bool(grace_until and local_now() < grace_until)
+    raw_focus_lock_active = bool(focus_lock_until and local_now() < focus_lock_until)
+    focus_lock_active = raw_focus_lock_active and not grace_active
     for key in ["blocked_at", "unblocked_at", "grace_until", "focus_lock_until", "focus_lock_started_at"]:
         if doc.get(key) and isinstance(doc[key], datetime):
             doc[key] = doc[key].strftime("%Y-%m-%d %H:%M:%S")
@@ -2221,7 +2224,8 @@ def blocker_status():
         "total_blocks_today": doc.get("total_blocks_today", 0),
         "sites":              doc.get("sites", DEFAULT_BLOCK_SITES),
         "current_risk":       risk,
-        "would_block_now":    focus_lock_active or risk >= threshold,
+        "would_block_now":    (raw_focus_lock_active or risk >= threshold) and not grace_active,
+        "grace_active":       grace_active,
         "focus_lock_active":  focus_lock_active,
         "focus_lock_until":   doc.get("focus_lock_until"),
         "focus_lock_started_at": doc.get("focus_lock_started_at"),
@@ -2242,6 +2246,7 @@ def pomodoro_focus_lock():
         focus_lock_until = now + timedelta(seconds=duration_seconds)
         focus_lock_started_at_str = format_local_time(now)
         focus_lock_until_str = format_local_time(focus_lock_until)
+        focus_lock_reason = (data.get("reason") or "pomodoro_focus").strip().lower() or "pomodoro_focus"
         existing_doc = block_configs.find_one({"email": email}, {"sites": 1}) or {}
         existing_sites = [s.strip().lower() for s in existing_doc.get("sites", []) if isinstance(s, str) and s.strip()]
         merged_sites = list(dict.fromkeys(existing_sites + DEFAULT_BLOCK_SITES))
@@ -2251,7 +2256,7 @@ def pomodoro_focus_lock():
                 "$set": {
                     "focus_lock_started_at": focus_lock_started_at_str,
                     "focus_lock_until": focus_lock_until_str,
-                    "focus_lock_reason": "pomodoro_focus",
+                    "focus_lock_reason": focus_lock_reason,
                     "grace_until": None,
                     "sites": merged_sites,
                 }
@@ -2285,7 +2290,7 @@ def pomodoro_focus_lock():
 @jwt_required()
 def override_unblock():
     email       = get_jwt_identity()
-    grace_until = datetime.now() + timedelta(minutes=10)
+    grace_until = format_local_time(local_now() + timedelta(minutes=10))
     block_configs.update_one(
         {"email": email},
         {"$set": {"grace_until": grace_until, "currently_blocked": False}},

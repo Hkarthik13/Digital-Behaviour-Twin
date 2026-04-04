@@ -49,6 +49,7 @@ blocker_state = {
     "currently_blocked": False,
     "would_block_now":   False,
     "grace_until":       None,
+    "grace_active":      False,
     "focus_lock_until":  None,
     "focus_lock_active": False,
     "focus_lock_reason": None,
@@ -66,6 +67,7 @@ app_classification_state = {
 distraction_watch_state = {
     "active_since": None,
     "last_alert_at": None,
+    "penalty_lock_triggered": False,
 }
 FALLBACK_DISTRACTING_KEYWORDS = [
     "instagram",
@@ -608,6 +610,7 @@ def fetch_blocker_config(token: str):
             blocker_state["sites"]     = data.get("sites", [])
             blocker_state["currently_blocked"] = bool(data.get("currently_blocked", False))
             blocker_state["would_block_now"] = bool(data.get("would_block_now", False))
+            blocker_state["grace_active"] = bool(data.get("grace_active", False))
             grace_str = data.get("grace_until")
             if grace_str:
                 try:
@@ -756,6 +759,9 @@ def force_close_window(hwnd, pid, title: str):
 
 
 def enforce_focus_lock_process_block():
+    grace = blocker_state.get("grace_until")
+    if blocker_state.get("grace_active") or (grace and datetime.now() < grace):
+        return
     focus_lock_until = blocker_state.get("focus_lock_until")
     focus_lock_active = bool(blocker_state.get("focus_lock_active")) or bool(
         focus_lock_until and datetime.now() < focus_lock_until
@@ -780,6 +786,9 @@ def enforce_focus_lock_process_block():
 
 
 def enforce_focus_lock_app_block(token: str):
+    grace = blocker_state.get("grace_until")
+    if blocker_state.get("grace_active") or (grace and datetime.now() < grace):
+        return
     focus_lock_until = blocker_state.get("focus_lock_until")
     focus_lock_active = bool(blocker_state.get("focus_lock_active")) or bool(
         focus_lock_until and datetime.now() < focus_lock_until
@@ -891,6 +900,8 @@ atexit.register(cleanup_on_exit)
 
 
 def evaluate_blocker(token: str, risk_score: int):
+    grace = blocker_state.get("grace_until")
+    grace_active = bool(blocker_state.get("grace_active")) or bool(grace and datetime.now() < grace)
     focus_lock_until = blocker_state.get("focus_lock_until")
     focus_lock_active = bool(blocker_state.get("focus_lock_active")) or bool(
         focus_lock_until and datetime.now() < focus_lock_until
@@ -907,11 +918,14 @@ def evaluate_blocker(token: str, risk_score: int):
     ttl = blocker_state["config_ttl_secs"]
     if last_fetch is None or (datetime.now() - last_fetch).total_seconds() > ttl:
         fetch_blocker_config(token)
+        grace = blocker_state.get("grace_until")
+        grace_active = bool(blocker_state.get("grace_active")) or bool(grace and datetime.now() < grace)
         focus_lock_until = blocker_state.get("focus_lock_until")
-        focus_lock_active = bool(focus_lock_until and datetime.now() < focus_lock_until)
+        focus_lock_active = bool(blocker_state.get("focus_lock_active")) or bool(
+            focus_lock_until and datetime.now() < focus_lock_until
+        )
 
-    grace = blocker_state.get("grace_until")
-    if grace and datetime.now() < grace and not focus_lock_active:
+    if grace_active:
         if blocker_state["currently_blocked"]:
             remove_block()
             blocker_state["currently_blocked"] = False
@@ -1299,6 +1313,7 @@ def send_activity(token, app_name, duration_seconds):
             f"Type: {activity_type}"
         )
         maybe_trigger_local_distraction_alert(activity_type, duration_seconds)
+        maybe_trigger_distraction_penalty_lock(token, activity_type, duration_seconds)
         return "SUCCESS", response_data
 
     except Exception as e:
@@ -1329,6 +1344,50 @@ def maybe_trigger_local_distraction_alert(activity_type: str, duration_seconds: 
             )
     else:
         distraction_watch_state["active_since"] = None
+        distraction_watch_state["penalty_lock_triggered"] = False
+
+
+def maybe_trigger_distraction_penalty_lock(token: str, activity_type: str, duration_seconds: int):
+    now = datetime.now()
+    if activity_type != "distracting":
+        return
+    if distraction_watch_state.get("penalty_lock_triggered"):
+        return
+    if blocker_state.get("focus_lock_active") and blocker_state.get("focus_lock_reason") == "distraction_penalty":
+        distraction_watch_state["penalty_lock_triggered"] = True
+        return
+    active_since = distraction_watch_state.get("active_since")
+    if not active_since:
+        active_since = now - timedelta(seconds=duration_seconds)
+        distraction_watch_state["active_since"] = active_since
+    minutes = (now - active_since).total_seconds() / 60
+    if minutes < 25:
+        return
+    try:
+        response = authorized_request(
+            "POST",
+            "/pomodoro/focus-lock",
+            token=token,
+            json={"action": "start", "duration_seconds": 30 * 60, "reason": "distraction_penalty"},
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        if response is not None and response.status_code == 200:
+            distraction_watch_state["penalty_lock_triggered"] = True
+            print("[Blocker] 30-minute distraction penalty lock activated.")
+            threading.Thread(
+                target=show_attractive_alert,
+                args=("Distracting apps/sites continued after the warning.\n\nBlocked for 30 minutes.",),
+                daemon=True,
+            ).start()
+            send_whatsapp_tracker_async(
+                "*Penalty Block Activated*\n\n"
+                "You continued distracting usage after the warning.\n"
+                "Distracting sites are now blocked for 30 minutes."
+            )
+            refresh_and_enforce_blocker(token, 0, force_fetch=True)
+    except Exception as e:
+        print(f"[Blocker] Penalty lock activation failed: {e}")
 
 
 # ─────────────────────────────────────────────
