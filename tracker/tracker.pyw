@@ -52,6 +52,14 @@ blocker_state = {
     "last_config_fetch": None,
     "config_ttl_secs":   10,
 }
+app_classification_state = {
+    "productive": [],
+    "distracting": [],
+    "last_fetch": None,
+    "ttl_secs": 30,
+    "last_blocked_title": "",
+    "last_blocked_at": None,
+}
 
 HOSTS_FILE         = r"C:\Windows\System32\drivers\etc\hosts"
 HOSTS_MARKER_START = "# === Digital Behaviour Twin Blocker START ==="
@@ -561,6 +569,84 @@ def report_block_status(token: str, blocked: bool):
         )
     except Exception:
         pass
+
+
+def fetch_app_classifications(token: str):
+    last_fetch = app_classification_state.get("last_fetch")
+    if last_fetch and (datetime.now() - last_fetch).total_seconds() < app_classification_state["ttl_secs"]:
+        return
+    try:
+        res = authorized_request("GET", "/apps/classifications", token=token, timeout=8)
+        if res is None or res.status_code != 200:
+            return
+        data = res.json()
+        app_classification_state["productive"] = [str(v).lower() for v in data.get("productive", [])]
+        app_classification_state["distracting"] = [str(v).lower() for v in data.get("distracting", [])]
+        app_classification_state["last_fetch"] = datetime.now()
+    except Exception as e:
+        print(f"[AppBlock] Classification fetch error: {e}")
+
+
+def get_active_window_details():
+    try:
+        import win32gui
+        import win32process
+        hwnd = win32gui.GetForegroundWindow()
+        title = win32gui.GetWindowText(hwnd)
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        return hwnd, title, pid
+    except Exception:
+        return None, "", None
+
+
+def classify_window_title(title: str) -> str:
+    lower_title = (title or "").strip().lower()
+    if not lower_title:
+        return "neutral"
+    for keyword in app_classification_state.get("distracting", []):
+        if keyword and keyword in lower_title:
+            return "distracting"
+    for keyword in app_classification_state.get("productive", []):
+        if keyword and keyword in lower_title:
+            return "productive"
+    return "neutral"
+
+
+def enforce_focus_lock_app_block(token: str):
+    focus_lock_until = blocker_state.get("focus_lock_until")
+    if not (focus_lock_until and datetime.now() < focus_lock_until):
+        return
+
+    fetch_app_classifications(token)
+    hwnd, title, _pid = get_active_window_details()
+    if not hwnd or not title:
+        return
+
+    lower_title = title.lower()
+    if "digital twin tracker login" in lower_title or "digital behaviour twin" in lower_title:
+        return
+
+    if classify_window_title(title) != "distracting":
+        return
+
+    now = datetime.now()
+    if (
+        app_classification_state.get("last_blocked_title") == title
+        and app_classification_state.get("last_blocked_at")
+        and (now - app_classification_state["last_blocked_at"]).total_seconds() < 4
+    ):
+        return
+
+    try:
+        import win32con
+        import win32gui
+        win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+        app_classification_state["last_blocked_title"] = title
+        app_classification_state["last_blocked_at"] = now
+        print(f"[AppBlock] Focus lock blocked distracting window: {title[:80]}")
+    except Exception as e:
+        print(f"[AppBlock] Failed blocking window '{title[:60]}': {e}")
 
 
 def evaluate_blocker(token: str, risk_score: int):
@@ -1168,6 +1254,11 @@ def heartbeat_loop():
             else:
                 time.sleep(10)
                 continue
+        try:
+            fetch_blocker_config(token)
+            enforce_focus_lock_app_block(token)
+        except Exception as app_block_err:
+            print(f"[AppBlock] Loop error: {app_block_err}")
         if now - last_hb_time >= HB_INTERVAL:
             result, hb_data = send_heartbeat(token)
             if not result:
