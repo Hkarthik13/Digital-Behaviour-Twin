@@ -86,12 +86,15 @@ FALLBACK_DISTRACTING_PROCESS_NAMES = {
     "discord.exe",
     "telegram.exe",
     "whatsapp.exe",
+    "instagram.exe",
+}
+SAFE_BROWSER_PROCESS_NAMES = {
     "msedge.exe",
     "chrome.exe",
     "firefox.exe",
     "opera.exe",
-    "browser.exe",
-    "instagram.exe",
+    "iexplore.exe",
+    "brave.exe",
 }
 
 
@@ -794,6 +797,8 @@ def enforce_focus_lock_app_block(token: str):
         return
 
     process_name = get_process_image_name(pid)
+    if process_name in SAFE_BROWSER_PROCESS_NAMES:
+        return
     title_class = classify_window_title(title)
     process_class = classify_process_name(process_name)
     if title_class != "distracting" and process_class != "distracting":
@@ -914,17 +919,12 @@ def evaluate_blocker(token: str, risk_score: int):
             print(f"[Blocker] Grace period active until {grace.strftime('%H:%M:%S')}")
         return
 
-    threshold = blocker_state["threshold"]
     sites = blocker_state["sites"]
-    should_block = bool(sites) and (
-        focus_lock_active
-        or blocker_state.get("would_block_now")
-        or risk_score >= threshold
-    )
+    should_block = bool(sites) and focus_lock_active
     status_reason = (
         f"Pomodoro focus lock until {focus_lock_until.strftime('%H:%M:%S')}"
         if focus_lock_active and focus_lock_until
-        else f"Risk score: {risk_score}/100 (threshold: {threshold})"
+        else "Pomodoro focus lock inactive"
     )
 
     if should_block and not blocker_state["currently_blocked"]:
@@ -953,11 +953,11 @@ def evaluate_blocker(token: str, risk_score: int):
         if success:
             blocker_state["currently_blocked"] = False
             report_block_status(token, False)
-            print(f"[Blocker] Risk dropped to {risk_score} - sites unblocked.")
+            print("[Blocker] Pomodoro focus lock inactive - sites unblocked.")
             send_whatsapp_tracker_async(
                 f"*Sites Unblocked!*\n\n"
-                f"Risk score back to *{risk_score}/100*.\n"
-                f"You can use distracting apps again."
+                "Pomodoro focus session has stopped.\n"
+                "You can use distracting sites again."
             )
 
 
