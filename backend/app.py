@@ -111,6 +111,37 @@ def parse_local_datetime_string(raw_value):
     return dt_value.astimezone(APP_TZ)
 
 
+def compute_activity_totals(email: str):
+    day_start = local_day_start_utc_naive()
+    logs = list(activities.find({"email": email}, {"_id": 0, "type": 1, "duration": 1, "timestamp": 1}))
+
+    today_productive = 0
+    today_distracting = 0
+    overall_productive = 0
+    overall_distracting = 0
+
+    for log in logs:
+        duration = max(int(log.get("duration") or 0), 0)
+        log_type = log.get("type")
+        timestamp = log.get("timestamp")
+
+        if log_type == "productive":
+            overall_productive += duration
+            if isinstance(timestamp, datetime) and timestamp >= day_start:
+                today_productive += duration
+        elif log_type == "distracting":
+            overall_distracting += duration
+            if isinstance(timestamp, datetime) and timestamp >= day_start:
+                today_distracting += duration
+
+    return {
+        "today_productive": today_productive,
+        "today_distracting": today_distracting,
+        "overall_productive": overall_productive,
+        "overall_distracting": overall_distracting,
+    }
+
+
 def admin_required(fn):
     @wraps(fn)
     @jwt_required()
@@ -1348,12 +1379,14 @@ def twin_recommendation():
     email     = get_jwt_identity()
     ml_features = build_features(email, activities)
     prediction  = predict_all(ml_features)
-    twin_data   = twin.find_one({"email": email}) or {}
+    totals = compute_activity_totals(email)
     risk_data   = risk_scores.find_one({"email": email}) or {}
     return jsonify({
         "email": email,
-        "productive_time": twin_data.get("productive_time", 0),
-        "distracting_time": twin_data.get("distracting_time", 0),
+        "productive_time": totals["today_productive"],
+        "distracting_time": totals["today_distracting"],
+        "overall_productive_time": totals["overall_productive"],
+        "overall_distracting_time": totals["overall_distracting"],
         "risk_score": risk_data.get("risk_score", 0),
         "ml_state": prediction.get("focus_level")
     })
@@ -1427,17 +1460,23 @@ def focus_summary():
 @jwt_required()
 def daily_summary():
     email = get_jwt_identity()
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    logs  = list(activities.find({"email": email, "timestamp": {"$gte": today}}))
-    productive  = sum(l["duration"] for l in logs if l["type"] == "productive")
-    distracting = sum(l["duration"] for l in logs if l["type"] == "distracting")
-    total       = productive + distracting
-    focus_score = round((productive / total) * 100) if total > 0 else 0
-    alerts_today  = alerts.count_documents({"email": email, "timestamp": {"$gte": today}})
-    deep_sessions = focus_sessions.count_documents({"email": email, "timestamp": {"$gte": today}})
+    day_start = local_day_start_utc_naive()
+    totals = compute_activity_totals(email)
+    today_total = totals["today_productive"] + totals["today_distracting"]
+    overall_total = totals["overall_productive"] + totals["overall_distracting"]
+    focus_score = round((totals["today_productive"] / today_total) * 100) if today_total > 0 else 0
+    overall_focus_score = round((totals["overall_productive"] / overall_total) * 100) if overall_total > 0 else 0
+    alerts_today  = alerts.count_documents({"email": email, "timestamp": {"$gte": day_start}})
+    deep_sessions = focus_sessions.count_documents({"email": email, "timestamp": {"$gte": day_start}})
     return jsonify({
-        "productive_minutes": productive, "distracting_minutes": distracting,
-        "focus_score": focus_score, "alerts_today": alerts_today, "deep_work_sessions": deep_sessions
+        "productive_minutes": totals["today_productive"],
+        "distracting_minutes": totals["today_distracting"],
+        "overall_productive_minutes": totals["overall_productive"],
+        "overall_distracting_minutes": totals["overall_distracting"],
+        "focus_score": focus_score,
+        "overall_focus_score": overall_focus_score,
+        "alerts_today": alerts_today,
+        "deep_work_sessions": deep_sessions
     })
 
 @app.route("/twin/weekly-summary")
@@ -1902,8 +1941,30 @@ def behaviour_heatmap():
 @app.route("/twin/focus-timeline")
 @jwt_required()
 def focus_timeline():
-    logs = list(ml_states.find({"email": get_jwt_identity()}, {"_id": 0}).sort("last_updated", 1))
-    return jsonify([{"time": format_local_time(l["last_updated"], "%H:%M"), "score": l["predicted_score"]} for l in logs])
+    email = get_jwt_identity()
+    logs = list(activities.find({"email": email}, {"_id": 0, "timestamp": 1, "type": 1, "duration": 1}).sort("timestamp", 1))
+    if not logs:
+        return jsonify([])
+
+    buckets = defaultdict(lambda: {"productive": 0, "distracting": 0})
+    for log in logs:
+        timestamp = log.get("timestamp")
+        if not isinstance(timestamp, datetime):
+            continue
+        bucket_key = timestamp.strftime("%Y-%m-%d %H:00")
+        duration = max(int(log.get("duration") or 0), 0)
+        if log.get("type") == "productive":
+            buckets[bucket_key]["productive"] += duration
+        elif log.get("type") == "distracting":
+            buckets[bucket_key]["distracting"] += duration
+
+    points = []
+    for bucket_key, values in sorted(buckets.items()):
+        total = values["productive"] + values["distracting"]
+        score = round((values["productive"] / total) * 100, 1) if total > 0 else 0
+        points.append({"time": bucket_key[11:16], "score": score})
+
+    return jsonify(points[-12:])
 
 @app.route("/twin/weekly-report", methods=["GET"])
 @jwt_required()

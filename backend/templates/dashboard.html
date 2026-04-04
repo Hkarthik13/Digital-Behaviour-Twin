@@ -539,16 +539,19 @@
                 </div>
                 <div class="dash-grid">
                     <div class="card" style="text-align: center;">
-                        <h4 style="color: var(--text-gray); font-weight: 600;">Focus Score</h4>
+                        <h4 style="color: var(--text-gray); font-weight: 600;">Focus Score Today</h4>
                         <div id="uiFocusScore" class="stat-value">0%</div>
+                        <div id="uiOverallFocus" style="margin-top: 8px; font-size: 12px; font-weight: 600; color: var(--text-gray);">Overall: 0%</div>
                     </div>
                     <div class="card">
-                        <h4 style="color: var(--text-gray); font-weight: 600;"><i class="fa-solid fa-arrow-trend-up"></i> Productive</h4>
+                        <h4 style="color: var(--text-gray); font-weight: 600;"><i class="fa-solid fa-arrow-trend-up"></i> Productive Today</h4>
                         <div id="uiProd" class="stat-value green">0m 0s</div>
+                        <div id="uiProdOverall" style="margin-top: 8px; font-size: 12px; font-weight: 600; color: var(--text-gray);">Overall: 0m 0s</div>
                     </div>
                     <div class="card">
-                        <h4 style="color: var(--text-gray); font-weight: 600;"><i class="fa-solid fa-arrow-trend-down"></i> Distracted</h4>
+                        <h4 style="color: var(--text-gray); font-weight: 600;"><i class="fa-solid fa-arrow-trend-down"></i> Distracted Today</h4>
                         <div id="uiDist" class="stat-value red">0m 0s</div>
+                        <div id="uiDistOverall" style="margin-top: 8px; font-size: 12px; font-weight: 600; color: var(--text-gray);">Overall: 0m 0s</div>
                     </div>
                     <div class="card">
                         <h4 style="color: var(--text-gray); font-weight: 600;"><i class="fa-solid fa-triangle-exclamation"></i> Risk Level</h4>
@@ -1245,23 +1248,32 @@
 
         async function loadTwinData() {
             try {
-                const res  = await fetch(`${API_URL}/twin/recommendation`, { headers: authHeaders() });
-                if (res.status === 401 || res.status === 422) { logout(); return; }
-                const data = await res.json();
-                const prodSecs = data.productive_time || 0;
-                const distSecs = data.distracting_time || 0;
-                const total    = prodSecs + distSecs;
-                const focus    = total > 0 ? Math.round((prodSecs / total) * 100) : 0;
+                const [summaryRes, recoRes] = await Promise.all([
+                    fetch(`${API_URL}/twin/daily-summary`, { headers: authHeaders() }),
+                    fetch(`${API_URL}/twin/recommendation`, { headers: authHeaders() })
+                ]);
+                if (summaryRes.status === 401 || summaryRes.status === 422 || recoRes.status === 401 || recoRes.status === 422) { logout(); return; }
+                const summary = await summaryRes.json();
+                const data = await recoRes.json();
+                const prodSecs = summary.productive_minutes || 0;
+                const distSecs = summary.distracting_minutes || 0;
+                const overallProdSecs = summary.overall_productive_minutes || data.overall_productive_time || 0;
+                const overallDistSecs = summary.overall_distracting_minutes || data.overall_distracting_time || 0;
+                const focus = summary.focus_score || 0;
+                const overallFocus = summary.overall_focus_score || 0;
                 document.getElementById("uiProd").innerText       = formatTime(prodSecs);
                 document.getElementById("uiDist").innerText       = formatTime(distSecs);
                 document.getElementById("uiFocusScore").innerText = focus + "%";
+                document.getElementById("uiProdOverall").innerText = `Overall: ${formatTime(overallProdSecs)}`;
+                document.getElementById("uiDistOverall").innerText = `Overall: ${formatTime(overallDistSecs)}`;
+                document.getElementById("uiOverallFocus").innerText = `Overall: ${overallFocus}%`;
                 document.getElementById("uiRisk").innerText       = data.risk_score || 0;
-                const prodMins = Math.round(prodSecs / 60);
-                const distMins = Math.round(distSecs / 60);
+                const prodMins = Math.round(overallProdSecs / 60);
+                const distMins = Math.round(overallDistSecs / 60);
                 if (!donutChartObj) {
                     donutChartObj = new Chart(document.getElementById("donutChart"), {
                         type: "doughnut",
-                        data: { labels: ["Productive", "Distracting"], datasets: [{ data: [prodMins, distMins], backgroundColor: ["#10B981", "#F43F5E"] }] },
+                        data: { labels: ["Overall Productive", "Overall Distracting"], datasets: [{ data: [prodMins, distMins], backgroundColor: ["#10B981", "#F43F5E"] }] },
                         options: { responsive: true, maintainAspectRatio: false, cutout: '75%', plugins: { legend: { position: 'bottom', labels: { color: '#2E1065', font: {family: 'Poppins'} } } }, animation: { duration: 500 } }
                     });
                 } else { donutChartObj.data.datasets[0].data = [prodMins, distMins]; donutChartObj.update('none'); }
