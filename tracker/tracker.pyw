@@ -47,8 +47,10 @@ blocker_state = {
     "sites":             [],
     "currently_blocked": False,
     "grace_until":       None,
+    "focus_lock_until":  None,
+    "focus_lock_reason": None,
     "last_config_fetch": None,
-    "config_ttl_secs":   60,
+    "config_ttl_secs":   10,
 }
 
 HOSTS_FILE         = r"C:\Windows\System32\drivers\etc\hosts"
@@ -518,6 +520,15 @@ def fetch_blocker_config(token: str):
                     blocker_state["grace_until"] = None
             else:
                 blocker_state["grace_until"] = None
+            focus_lock_str = data.get("focus_lock_until")
+            if focus_lock_str:
+                try:
+                    blocker_state["focus_lock_until"] = datetime.strptime(focus_lock_str, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    blocker_state["focus_lock_until"] = None
+            else:
+                blocker_state["focus_lock_until"] = None
+            blocker_state["focus_lock_reason"] = data.get("focus_lock_reason")
             blocker_state["last_config_fetch"] = datetime.now()
             print(f"[Blocker] Config synced — threshold: {blocker_state['threshold']}, "
                   f"sites: {len(blocker_state['sites'])}, enabled: {blocker_state['enabled']}")
@@ -606,6 +617,76 @@ def cleanup_on_exit():
         remove_block()
 
 atexit.register(cleanup_on_exit)
+
+
+def evaluate_blocker(token: str, risk_score: int):
+    focus_lock_until = blocker_state.get("focus_lock_until")
+    focus_lock_active = bool(focus_lock_until and datetime.now() < focus_lock_until)
+
+    if not blocker_state["enabled"] and not focus_lock_active:
+        if blocker_state["currently_blocked"]:
+            remove_block()
+            blocker_state["currently_blocked"] = False
+            report_block_status(token, False)
+        return
+
+    last_fetch = blocker_state.get("last_config_fetch")
+    ttl = blocker_state["config_ttl_secs"]
+    if last_fetch is None or (datetime.now() - last_fetch).total_seconds() > ttl:
+        fetch_blocker_config(token)
+        focus_lock_until = blocker_state.get("focus_lock_until")
+        focus_lock_active = bool(focus_lock_until and datetime.now() < focus_lock_until)
+
+    grace = blocker_state.get("grace_until")
+    if grace and datetime.now() < grace and not focus_lock_active:
+        if blocker_state["currently_blocked"]:
+            remove_block()
+            blocker_state["currently_blocked"] = False
+            report_block_status(token, False)
+            print(f"[Blocker] Grace period active until {grace.strftime('%H:%M:%S')}")
+        return
+
+    threshold = blocker_state["threshold"]
+    sites = blocker_state["sites"]
+    should_block = bool(sites) and (focus_lock_active or risk_score >= threshold)
+    status_reason = (
+        f"Pomodoro focus lock until {focus_lock_until.strftime('%H:%M:%S')}"
+        if focus_lock_active and focus_lock_until
+        else f"Risk score: {risk_score}/100 (threshold: {threshold})"
+    )
+
+    if should_block and not blocker_state["currently_blocked"]:
+        success = apply_block(sites)
+        if success:
+            blocker_state["currently_blocked"] = True
+            report_block_status(token, True)
+            threading.Thread(
+                target=show_attractive_alert,
+                args=(
+                    f"WEBSITE BLOCKER ACTIVATED\n\n"
+                    f"{status_reason}\n\n"
+                    f"{len(sites)} distracting sites have been blocked.\n"
+                    f"Focus up and your score will drop!"
+                ),
+                daemon=True
+            ).start()
+            send_whatsapp_tracker_async(
+                f"*Sites Blocked Automatically*\n\n"
+                f"{status_reason}.\n"
+                f"{len(sites)} sites blocked on your PC.\n\n"
+                f"Stay focused while the lock is active."
+            )
+    elif not should_block and blocker_state["currently_blocked"]:
+        success = remove_block()
+        if success:
+            blocker_state["currently_blocked"] = False
+            report_block_status(token, False)
+            print(f"[Blocker] Risk dropped to {risk_score} - sites unblocked.")
+            send_whatsapp_tracker_async(
+                f"*Sites Unblocked!*\n\n"
+                f"Risk score back to *{risk_score}/100*.\n"
+                f"You can use distracting apps again."
+            )
 
 
 # ─────────────────────────────────────────────

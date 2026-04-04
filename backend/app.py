@@ -31,7 +31,7 @@ from ml.rule_engine import rule_engine
 from ml.predictor import predict_all
 from ml.feature_builder import build_features
 from ml.isolation_model import predict_anomaly, train_isolation_model
-from ml.insight_engine import get_best_focus_hours
+from ml.insight_engine import analyze_focus_patterns, get_best_focus_hours
 from routes.activity_routes import activity_bp
 from apscheduler.schedulers.background import BackgroundScheduler
 from collections import defaultdict
@@ -88,6 +88,27 @@ def local_day_start_utc_naive(reference_dt=None):
     local_dt = as_local_time(reference_dt) if reference_dt else local_now()
     start_local = local_dt.replace(hour=0, minute=0, second=0, microsecond=0)
     return start_local.astimezone(UTC_TZ).replace(tzinfo=None)
+
+
+def parse_local_datetime_string(raw_value):
+    if not raw_value:
+        return None
+    if isinstance(raw_value, datetime):
+        dt_value = raw_value
+    else:
+        text = str(raw_value).strip()
+        if not text:
+            return None
+        try:
+            dt_value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                dt_value = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+    if dt_value.tzinfo is None:
+        return dt_value.replace(tzinfo=APP_TZ)
+    return dt_value.astimezone(APP_TZ)
 
 
 def admin_required(fn):
@@ -1472,39 +1493,29 @@ def ai_coach_merged():
     if risk > 70:   base_advice = "High distraction detected. Try 25 minute focus blocks."
     elif risk > 40: base_advice = "You are slightly distracted. Reduce social media usage."
     else:           base_advice = "Your productivity pattern looks stable."
-    pipeline = [
-        {"$match": {"email": email}},
-        {"$group": {"_id": {"$hour": "$timestamp"},
-                    "productive": {"$sum": {"$cond": [{"$eq": ["$type", "productive"]}, 1, 0]}},
-                    "total": {"$sum": 1}}}
-    ]
-    data = list(activities.aggregate(pipeline))
-    best_hour, best_score = 0, 0
-    for d in data:
-        score = (d["productive"] / d["total"]) * 100
-        if score > best_score:
-            best_score = score
-            best_hour  = d["_id"]
-    label = f"{best_hour-12} PM" if best_hour > 12 else f"{best_hour} AM"
-    if best_hour == 0:  label = "12 AM"
-    if best_hour == 12: label = "12 PM"
-    full_advice = f"{base_advice}\n\nYour peak focus time is around {label}. Recommended: Schedule deep work during this time."
-    return jsonify({"risk_score": risk, "advice": full_advice})
+    focus_analysis = analyze_focus_patterns(email, activities)
+    if focus_analysis["best_focus_hours"]:
+        best = focus_analysis["best_focus_hours"][0]
+        full_advice = (
+            f"{base_advice}\n\n"
+            f"{focus_analysis['summary']} "
+            f"Confidence: {focus_analysis['confidence']}. "
+            f"Best hour score: {best['score']}."
+        )
+    else:
+        full_advice = f"{base_advice}\n\n{focus_analysis['summary']}"
+    return jsonify({
+        "risk_score": risk,
+        "advice": full_advice,
+        "focus_analysis": focus_analysis,
+    })
 
 @app.route("/twin/best-focus-hours")
 @jwt_required()
 def best_focus_hours():
     email    = get_jwt_identity()
-    pipeline = [
-        {"$match": {"email": email}},
-        {"$group": {"_id": {"$hour": "$timestamp"},
-                    "productive": {"$sum": {"$cond": [{"$eq": ["$type", "productive"]}, 1, 0]}},
-                    "total": {"$sum": 1}}}
-    ]
-    data    = list(activities.aggregate(pipeline))
-    results = sorted([{"hour": d["_id"], "score": round((d["productive"]/d["total"])*100, 2)} for d in data],
-                     key=lambda x: x["score"], reverse=True)
-    return jsonify({"best_focus_hours": results[:3]})
+    analysis = analyze_focus_patterns(email, activities)
+    return jsonify(analysis)
 
 @app.route("/twin/best-focusing-hours")
 @jwt_required()
@@ -2035,9 +2046,12 @@ def get_blocker_config():
             "unblocked_at":      None,
             "total_blocks_today": 0,
             "grace_until":       None,
+            "focus_lock_until":  None,
+            "focus_lock_started_at": None,
+            "focus_lock_reason": None,
         }
         block_configs.insert_one({**doc})
-    for key in ["blocked_at", "unblocked_at", "grace_until"]:
+    for key in ["blocked_at", "unblocked_at", "grace_until", "focus_lock_until", "focus_lock_started_at"]:
         if doc.get(key) and isinstance(doc[key], datetime):
             doc[key] = doc[key].strftime("%Y-%m-%d %H:%M:%S")
     return jsonify(doc)
@@ -2114,7 +2128,9 @@ def blocker_status():
     risk_doc  = risk_scores.find_one({"email": email}) or {}
     risk      = risk_doc.get("risk_score", 0)
     threshold = doc.get("risk_threshold", 70)
-    for key in ["blocked_at", "unblocked_at", "grace_until"]:
+    focus_lock_until = parse_local_datetime_string(doc.get("focus_lock_until"))
+    focus_lock_active = bool(focus_lock_until and local_now() < focus_lock_until)
+    for key in ["blocked_at", "unblocked_at", "grace_until", "focus_lock_until", "focus_lock_started_at"]:
         if doc.get(key) and isinstance(doc[key], datetime):
             doc[key] = doc[key].strftime("%Y-%m-%d %H:%M:%S")
     return jsonify({
@@ -2127,8 +2143,58 @@ def blocker_status():
         "total_blocks_today": doc.get("total_blocks_today", 0),
         "sites":              doc.get("sites", DEFAULT_BLOCK_SITES),
         "current_risk":       risk,
-        "would_block_now":    risk >= threshold,
+        "would_block_now":    focus_lock_active or risk >= threshold,
+        "focus_lock_active":  focus_lock_active,
+        "focus_lock_until":   doc.get("focus_lock_until"),
+        "focus_lock_started_at": doc.get("focus_lock_started_at"),
+        "focus_lock_reason":  doc.get("focus_lock_reason"),
     })
+
+
+@app.route("/pomodoro/focus-lock", methods=["POST"])
+@jwt_required()
+def pomodoro_focus_lock():
+    email = get_jwt_identity()
+    data = request.get_json() or {}
+    action = (data.get("action") or "").strip().lower()
+    now = local_now()
+
+    if action == "start":
+        duration_seconds = max(int(data.get("duration_seconds") or 25 * 60), 60)
+        focus_lock_until = now + timedelta(seconds=duration_seconds)
+        block_configs.update_one(
+            {"email": email},
+            {
+                "$set": {
+                    "focus_lock_started_at": now,
+                    "focus_lock_until": focus_lock_until,
+                    "focus_lock_reason": "pomodoro_focus",
+                    "grace_until": None,
+                }
+            },
+            upsert=True,
+        )
+        return jsonify({
+            "msg": "Focus lock enabled.",
+            "focus_lock_until": format_local_time(focus_lock_until),
+            "focus_lock_active": True,
+        })
+
+    if action in {"pause", "stop", "complete", "reset"}:
+        block_configs.update_one(
+            {"email": email},
+            {
+                "$set": {
+                    "focus_lock_until": None,
+                    "focus_lock_started_at": None,
+                    "focus_lock_reason": None,
+                }
+            },
+            upsert=True,
+        )
+        return jsonify({"msg": "Focus lock cleared.", "focus_lock_active": False})
+
+    return jsonify({"error": "Invalid action"}), 400
 
 
 @app.route("/blocker/override-unblock", methods=["POST"])

@@ -690,6 +690,7 @@
                             <button class="btn" style="background: rgba(255,255,255,0.7); color: var(--danger); border: 1px solid var(--glass-border); box-shadow: none;" onclick="resetPomo()"><i class="fa-solid fa-rotate-left"></i> Reset</button>
                         </div>
                         <p style="margin-top: 20px; color: var(--text-gray); font-size: 14px; font-weight: 500;">Sessions today: <strong id="pomoSessionCount" style="color: var(--primary);">0</strong></p>
+                        <p id="pomoBlockHint" style="margin-top: 10px; color: var(--danger); font-size: 13px; font-weight: 600;">During a 25-minute focus session, distracting sites will be blocked on tracker-connected devices.</p>
                     </div>
                 </div>
             </section>
@@ -1306,7 +1307,15 @@
                 const data = await res.json();
                 const list = document.getElementById("focusHoursList");
                 list.innerHTML = "";
-                (data.best_focus_hours || []).forEach(h => { list.innerHTML += `<li><span><i class="fa-regular fa-clock"></i> ${h.hour}:00</span><strong style="color:var(--success)">${h.score}% Focus</strong></li>`; });
+                if (data.summary) {
+                    list.innerHTML += `<li><span><i class="fa-solid fa-brain"></i> Analysis</span><strong style="color:var(--primary)">${data.summary}</strong></li>`;
+                }
+                (data.best_focus_hours || []).forEach(h => {
+                    list.innerHTML += `<li><span><i class="fa-regular fa-clock"></i> ${h.label || `${h.hour}:00`}</span><strong style="color:var(--success)">${h.score}% Score · ${h.focus_ratio}% Focus</strong></li>`;
+                });
+                if (!list.innerHTML) {
+                    list.innerHTML = `<li><span><i class="fa-regular fa-clock"></i> No Data</span><strong style="color:var(--text-gray)">Keep tracking to unlock real focus hours</strong></li>`;
+                }
             } catch(e) {}
         }
 
@@ -1625,8 +1634,22 @@
         let pomoMode = 'focus', pomoTotal = POMO_MODES.focus.duration, pomoRemaining = POMO_MODES.focus.duration;
         let pomoInterval = null, pomoRunning = false, pomoSessions = 0;
 
+        async function syncPomodoroFocusLock(action) {
+            try {
+                await fetch(`${API_URL}/pomodoro/focus-lock`, {
+                    method: 'POST',
+                    headers: authHeaders(),
+                    body: JSON.stringify({ action, duration_seconds: pomoMode === 'focus' ? pomoRemaining : 0 })
+                });
+                loadBlockerStatus();
+            } catch(e) {
+                console.error('syncPomodoroFocusLock error', e);
+            }
+        }
+
         function setPomoMode(mode, btn) {
             if (pomoRunning) return;
+            if (pomoMode === 'focus' && mode !== 'focus') syncPomodoroFocusLock('reset');
             pomoMode = mode; pomoTotal = POMO_MODES[mode].duration; pomoRemaining = pomoTotal;
             document.querySelectorAll('.pomo-mode-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
@@ -1646,9 +1669,14 @@
         }
 
         function startPomo() {
-            if (pomoRunning) { clearInterval(pomoInterval); pomoRunning = false; document.getElementById('pomoStartBtn').innerHTML = '<i class="fa-solid fa-play"></i> Resume'; return; }
+            if (pomoRunning) {
+                clearInterval(pomoInterval); pomoRunning = false; document.getElementById('pomoStartBtn').innerHTML = '<i class="fa-solid fa-play"></i> Resume';
+                if (pomoMode === 'focus') syncPomodoroFocusLock('pause');
+                return;
+            }
             pomoRunning = true;
             document.getElementById('pomoStartBtn').innerHTML = '<i class="fa-solid fa-pause"></i> Pause';
+            if (pomoMode === 'focus') syncPomodoroFocusLock('start');
             pomoInterval = setInterval(() => {
                 pomoRemaining--;
                 renderPomoTime(); updatePomoRing();
@@ -1656,6 +1684,7 @@
                     clearInterval(pomoInterval); pomoRunning = false;
                     document.getElementById('pomoStartBtn').innerHTML = '<i class="fa-solid fa-play"></i> Start';
                     if (pomoMode === 'focus') { pomoSessions++; document.getElementById('pomoSessionCount').innerText = pomoSessions; }
+                    if (pomoMode === 'focus') syncPomodoroFocusLock('complete');
                     pomoRemaining = pomoTotal; renderPomoTime(); updatePomoRing();
                     if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
                     alert(pomoMode === 'focus' ? "🎉 Focus session complete! Take a break." : "⚡ Break over! Time to focus.");
@@ -1666,6 +1695,7 @@
         function resetPomo() {
             clearInterval(pomoInterval); pomoRunning = false; pomoRemaining = pomoTotal;
             document.getElementById('pomoStartBtn').innerHTML = '<i class="fa-solid fa-play"></i> Start';
+            if (pomoMode === 'focus') syncPomodoroFocusLock('reset');
             renderPomoTime(); updatePomoRing();
         }
 
@@ -1820,6 +1850,7 @@
                 const risk        = data.current_risk || 0;
                 const threshold   = data.risk_threshold || 70;
                 const wouldBlock  = data.would_block_now;
+                const focusLockActive = data.focus_lock_active;
 
                 document.getElementById('blockerCurrentRisk').innerText = risk;
                 document.getElementById('blockerCurrentRisk').style.color =
@@ -1840,7 +1871,15 @@
                 const icon  = document.getElementById('blockerStatusIcon');
                 const title = document.getElementById('blockerStatusTitle');
                 const sub   = document.getElementById('blockerStatusSub');
-                if (isBlocked) {
+                if (isBlocked && focusLockActive) {
+                    icon.innerText  = '🎯';
+                    title.innerText = 'Pomodoro Lock Active';
+                    title.style.color = 'var(--danger)';
+                    sub.innerText   = data.focus_lock_until
+                        ? `Distracting sites blocked until ${data.focus_lock_until.split(' ')[1]?.slice(0, 5) || '--'}`
+                        : 'Distracting sites are blocked for your focus session';
+                    document.getElementById('blockerActiveBadge').style.display = 'block';
+                } else if (isBlocked) {
                     icon.innerText  = '🔒';
                     title.innerText = `BLOCKING ${(data.sites||[]).length} Sites`;
                     title.style.color = 'var(--danger)';
