@@ -88,6 +88,28 @@ FALLBACK_DISTRACTING_PROCESS_NAMES = {
     "instagram.exe",
 }
 
+
+def list_running_processes():
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        rows = []
+        for raw in (result.stdout or "").splitlines():
+            raw = raw.strip()
+            if not raw or "INFO:" in raw.upper():
+                continue
+            first = raw.strip('"').split('","')[0].strip().lower()
+            if first:
+                rows.append(first)
+        return rows
+    except Exception:
+        return []
+
 HOSTS_FILE         = r"C:\Windows\System32\drivers\etc\hosts"
 HOSTS_MARKER_START = "# === Digital Behaviour Twin Blocker START ==="
 HOSTS_MARKER_END   = "# === Digital Behaviour Twin Blocker END ==="
@@ -515,6 +537,19 @@ def _strip_blocker_section(content: str) -> str:
     return "".join(result)
 
 
+def flush_dns_cache():
+    try:
+        subprocess.run(
+            ["ipconfig", "/flushdns"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except Exception as e:
+        print(f"[Blocker] DNS flush error: {e}")
+
+
 def apply_block(sites: list) -> bool:
     if not sites:
         return False
@@ -532,6 +567,7 @@ def apply_block(sites: list) -> bool:
     new_content = content + "".join(block_lines)
     success     = _hosts_write(new_content)
     if success:
+        flush_dns_cache()
         print(f"[Blocker] 🔒 Blocked {len(sites)} sites in hosts file.")
     return success
 
@@ -541,6 +577,7 @@ def remove_block() -> bool:
     new_content = _strip_blocker_section(content)
     success     = _hosts_write(new_content)
     if success:
+        flush_dns_cache()
         print("[Blocker] 🔓 All sites unblocked.")
     return success
 
@@ -701,6 +738,27 @@ def force_close_window(hwnd, pid, title: str):
         )
     except Exception as e:
         print(f"[AppBlock] taskkill failed for '{title[:60]}': {e}")
+
+
+def enforce_focus_lock_process_block():
+    focus_lock_until = blocker_state.get("focus_lock_until")
+    if not (focus_lock_until and datetime.now() < focus_lock_until):
+        return
+
+    running = set(list_running_processes())
+    targets = sorted(running.intersection(FALLBACK_DISTRACTING_PROCESS_NAMES))
+    for process_name in targets:
+        try:
+            subprocess.run(
+                ["taskkill", "/IM", process_name, "/T", "/F"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            print(f"[AppBlock] Focus lock killed distracting process: {process_name}")
+        except Exception as e:
+            print(f"[AppBlock] Failed killing process {process_name}: {e}")
 
 
 def enforce_focus_lock_app_block(token: str):
@@ -877,6 +935,14 @@ def evaluate_blocker(token: str, risk_score: int):
                 f"Risk score back to *{risk_score}/100*.\n"
                 f"You can use distracting apps again."
             )
+
+
+def refresh_and_enforce_blocker(token: str, risk_score: int = 0, force_fetch: bool = False):
+    last_fetch = blocker_state.get("last_config_fetch")
+    ttl = blocker_state["config_ttl_secs"]
+    if force_fetch or last_fetch is None or (datetime.now() - last_fetch).total_seconds() > ttl:
+        fetch_blocker_config(token)
+    evaluate_blocker(token, risk_score)
 
 
 # ─────────────────────────────────────────────
@@ -1341,13 +1407,14 @@ def heartbeat_loop():
             success = register_device(token)
             if success:
                 device_registered = True
-                fetch_blocker_config(token)
+                refresh_and_enforce_blocker(token, 0, force_fetch=True)
             else:
                 time.sleep(10)
                 continue
         try:
-            fetch_blocker_config(token)
+            refresh_and_enforce_blocker(token, 0)
             enforce_focus_lock_app_block(token)
+            enforce_focus_lock_process_block()
         except Exception as app_block_err:
             print(f"[AppBlock] Loop error: {app_block_err}")
         if now - last_hb_time >= HB_INTERVAL:
@@ -1365,9 +1432,12 @@ def heartbeat_loop():
                     )
                     if rs is not None and rs.status_code == 200:
                         risk = rs.json().get("risk_score", 0)
-                        evaluate_blocker(token, risk)
+                        refresh_and_enforce_blocker(token, risk)
+                    else:
+                        refresh_and_enforce_blocker(token, 0)
                 except Exception as be:
                     print(f"[Blocker] Risk fetch error: {be}")
+                    refresh_and_enforce_blocker(token, 0)
             last_hb_time = now
         time.sleep(5)
 
@@ -1468,8 +1538,9 @@ if __name__ == "__main__":
         last_activity = now
         duration  = max(5, min(elapsed, 60))
         try:
-            fetch_blocker_config(token)
+            refresh_and_enforce_blocker(token, 0)
             enforce_focus_lock_app_block(token)
+            enforce_focus_lock_process_block()
         except Exception as loop_block_err:
             print(f"[AppBlock] Main-loop enforcement error: {loop_block_err}")
         status, _ = send_activity(token, app_name, duration)
