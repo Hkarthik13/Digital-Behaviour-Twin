@@ -51,7 +51,7 @@ blocker_state = {
     "focus_lock_until":  None,
     "focus_lock_reason": None,
     "last_config_fetch": None,
-    "config_ttl_secs":   10,
+    "config_ttl_secs":   5,
 }
 app_classification_state = {
     "productive": [],
@@ -76,6 +76,17 @@ FALLBACK_DISTRACTING_KEYWORDS = [
     "telegram",
     "steam",
 ]
+FALLBACK_DISTRACTING_PROCESS_NAMES = {
+    "discord.exe",
+    "telegram.exe",
+    "whatsapp.exe",
+    "msedge.exe",
+    "chrome.exe",
+    "firefox.exe",
+    "opera.exe",
+    "browser.exe",
+    "instagram.exe",
+}
 
 HOSTS_FILE         = r"C:\Windows\System32\drivers\etc\hosts"
 HOSTS_MARKER_START = "# === Digital Behaviour Twin Blocker START ==="
@@ -615,6 +626,28 @@ def get_active_window_details():
         return None, "", None
 
 
+def get_process_image_name(pid):
+    if not pid:
+        return ""
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        line = (result.stdout or "").strip().splitlines()
+        if not line:
+            return ""
+        first = line[0].strip().strip('"')
+        if "INFO:" in first.upper():
+            return ""
+        return first.split('","')[0].strip().lower()
+    except Exception:
+        return ""
+
+
 def classify_window_title(title: str) -> str:
     lower_title = (title or "").strip().lower()
     if not lower_title:
@@ -627,6 +660,21 @@ def classify_window_title(title: str) -> str:
             return "distracting"
     for keyword in app_classification_state.get("productive", []):
         if keyword and keyword in lower_title:
+            return "productive"
+    return "neutral"
+
+
+def classify_process_name(process_name: str) -> str:
+    lower_name = (process_name or "").strip().lower()
+    if not lower_name:
+        return "neutral"
+    if lower_name in FALLBACK_DISTRACTING_PROCESS_NAMES:
+        return "distracting"
+    for keyword in app_classification_state.get("distracting", []):
+        if keyword and keyword in lower_name:
+            return "distracting"
+    for keyword in app_classification_state.get("productive", []):
+        if keyword and keyword in lower_name:
             return "productive"
     return "neutral"
 
@@ -669,7 +717,10 @@ def enforce_focus_lock_app_block(token: str):
     if "digital twin tracker login" in lower_title or "digital behaviour twin" in lower_title:
         return
 
-    if classify_window_title(title) != "distracting":
+    process_name = get_process_image_name(pid)
+    title_class = classify_window_title(title)
+    process_class = classify_process_name(process_name)
+    if title_class != "distracting" and process_class != "distracting":
         return
 
     now = datetime.now()
@@ -684,7 +735,7 @@ def enforce_focus_lock_app_block(token: str):
         force_close_window(hwnd, pid, title)
         app_classification_state["last_blocked_title"] = title
         app_classification_state["last_blocked_at"] = now
-        print(f"[AppBlock] Focus lock blocked distracting window: {title[:80]}")
+        print(f"[AppBlock] Focus lock blocked distracting window: {title[:80]} | process={process_name or 'unknown'}")
     except Exception as e:
         print(f"[AppBlock] Failed blocking window '{title[:60]}': {e}")
 

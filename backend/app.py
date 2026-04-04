@@ -924,6 +924,7 @@ def check_distraction_alert(email):
     last_alert = alerts.find_one({"email": email, "reason": "Continuous Distraction",
                                   "timestamp": {"$gte": now - timedelta(minutes=cooldown_minutes)}})
     if (total_distracting / 60) >= threshold_minutes and not last_alert:
+        print(f"[Alert] Continuous distraction alert triggered for {email}: {round(total_distracting / 60, 2)} minutes")
         alerts.insert_one({"email": email, "timestamp": now, "reason": "Continuous Distraction"})
         try: send_alert_email(email, "🚨 WAKE UP! You've been distracted for over 20 minutes. Get back to work!")
         except: pass
@@ -2096,6 +2097,7 @@ DEFAULT_BLOCK_SITES = [
     "instagram.com", "facebook.com", "twitter.com", "x.com",
     "tiktok.com", "reddit.com", "youtube.com", "netflix.com",
     "twitch.tv", "snapchat.com", "pinterest.com",
+    "discord.com", "web.whatsapp.com", "whatsapp.com", "telegram.org",
 ]
 
 @app.route("/blocker/config", methods=["GET"])
