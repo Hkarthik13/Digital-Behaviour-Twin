@@ -22,7 +22,7 @@ load_dotenv(ENV_FILE)
 BASE_URL     = os.getenv("API_BASE_URL", "http://127.0.0.1:5000").rstrip("/")
 INTERVAL     = 5
 OCR_INTERVAL = 30
-HB_INTERVAL  = 30
+HB_INTERVAL  = 10
 
 AUTH_STATE_FILE = os.path.join(os.path.dirname(__file__), "token.json")
 LEGACY_TOKEN_FILE = os.path.join(os.path.dirname(__file__), "..", "backend", "active_token.txt")
@@ -120,22 +120,25 @@ def _show_tracker_login_window():
 
     root = tk.Tk()
     root.title("Digital Twin Tracker Login")
-    root.geometry("520x430")
-    root.resizable(False, False)
+    win_w = 560
+    win_h = 560
+    root.geometry(f"{win_w}x{win_h}")
+    root.minsize(540, 540)
+    root.resizable(True, True)
     root.configure(bg="#08111f")
     root.attributes("-topmost", True)
     root.update_idletasks()
-    x = (root.winfo_screenwidth() - 520) // 2
-    y = (root.winfo_screenheight() - 430) // 2
-    root.geometry(f"520x430+{x}+{y}")
+    x = (root.winfo_screenwidth() - win_w) // 2
+    y = max((root.winfo_screenheight() - win_h) // 2, 30)
+    root.geometry(f"{win_w}x{win_h}+{x}+{y}")
 
     shell = tk.Frame(root, bg="#08111f")
-    shell.pack(fill="both", expand=True, padx=18, pady=18)
+    shell.pack(fill="both", expand=True, padx=14, pady=14)
 
     card = tk.Frame(shell, bg="#0f172a", highlightbackground="#1e293b", highlightthickness=1)
     card.pack(fill="both", expand=True)
 
-    hero = tk.Frame(card, bg="#14b8a6", height=88)
+    hero = tk.Frame(card, bg="#14b8a6", height=80)
     hero.pack(fill="x")
     hero.pack_propagate(False)
 
@@ -150,13 +153,13 @@ def _show_tracker_login_window():
     tk.Label(
         hero,
         text="Tracker sign in",
-        font=("Arial", 22, "bold"),
+        font=("Arial", 20, "bold"),
         bg="#14b8a6",
         fg="#ffffff",
     ).pack(anchor="w", padx=22)
 
     content = tk.Frame(card, bg="#0f172a")
-    content.pack(fill="both", expand=True, padx=24, pady=20)
+    content.pack(fill="both", expand=True, padx=20, pady=16)
 
     tk.Label(
         content,
@@ -164,7 +167,7 @@ def _show_tracker_login_window():
         font=("Arial", 10),
         bg="#0f172a",
         fg="#cbd5e1",
-        wraplength=440,
+        wraplength=480,
         justify="left",
     ).pack(anchor="w")
 
@@ -174,12 +177,12 @@ def _show_tracker_login_window():
         font=("Arial", 9),
         bg="#0f172a",
         fg="#67e8f9",
-        wraplength=440,
+        wraplength=480,
         justify="left",
-    ).pack(anchor="w", pady=(8, 16))
+    ).pack(anchor="w", pady=(8, 12))
 
     features = tk.Frame(content, bg="#111c2f")
-    features.pack(fill="x", pady=(0, 18))
+    features.pack(fill="x", pady=(0, 12))
     for bullet in (
         "Auto syncs app activity to your live dashboard",
         "Keeps this device linked to your account",
@@ -193,7 +196,7 @@ def _show_tracker_login_window():
             fg="#dbeafe",
             anchor="w",
             padx=10,
-            pady=4,
+            pady=3,
         ).pack(fill="x")
 
     form = tk.Frame(content, bg="#0f172a")
@@ -208,7 +211,7 @@ def _show_tracker_login_window():
         fg="#0f172a",
         insertbackground="#0f172a",
     )
-    email_entry.pack(fill="x", pady=(6, 12), ipady=7)
+    email_entry.pack(fill="x", pady=(6, 10), ipady=7)
 
     tk.Label(form, text="Password", font=("Arial", 10, "bold"), bg="#0f172a", fg="#e2e8f0").pack(anchor="w")
     password_entry = tk.Entry(
@@ -240,16 +243,26 @@ def _show_tracker_login_window():
         selectcolor="#0f172a",
     ).pack(anchor="w", pady=(0, 8))
 
+    tk.Label(
+        form,
+        text="Pomodoro blocking works for distracting websites/domains. Run tracker as Administrator for reliable hosts-file blocking.",
+        font=("Arial", 8),
+        bg="#0f172a",
+        fg="#94a3b8",
+        wraplength=480,
+        justify="left",
+    ).pack(anchor="w", pady=(0, 8))
+
     status_label = tk.Label(
         content,
         text="",
         font=("Arial", 9),
         bg="#0f172a",
         fg="#fca5a5",
-        wraplength=440,
+        wraplength=480,
         justify="left",
     )
-    status_label.pack(anchor="w", pady=(2, 10))
+    status_label.pack(anchor="w", pady=(2, 8))
 
     def submit():
         email = email_entry.get().strip().lower()
