@@ -1227,15 +1227,32 @@
             window.location.reload();
         }
 
+        let dashboardIntervalsStarted = false;
+
         function fetchAllData() {
             loadTwinData(); loadCurrentApp(); loadAICoach(); loadTimeline();
-            loadBestFocusHours(); loadDistractions(); loadWeeklyChart();
+            loadBestFocusHours(); loadDistractions(); loadWeeklyChart(); loadBlockerStatus();
             loadDailyPlan(); loadGoalPrediction(); loadStreakInsights(); loadAccuracy(); loadSyncStatus();
-            setInterval(loadCurrentApp, 3000);
-            setInterval(loadTwinData, 5000);
-            setInterval(loadTimeline, 60000);
-            setInterval(loadSyncStatus, 10000);
-            setInterval(sendBrowserHeartbeat, 30000);
+            if (dashboardIntervalsStarted) return;
+            dashboardIntervalsStarted = true;
+            setInterval(() => {
+                if (!document.hidden) loadCurrentApp();
+            }, 2000);
+            setInterval(() => {
+                if (!document.hidden) loadTwinData();
+            }, 2500);
+            setInterval(() => {
+                if (!document.hidden) loadTimeline();
+            }, 10000);
+            setInterval(() => {
+                if (!document.hidden) loadAICoach();
+            }, 12000);
+            setInterval(() => {
+                if (!document.hidden) loadSyncStatus();
+            }, 5000);
+            setInterval(() => {
+                if (!document.hidden) sendBrowserHeartbeat();
+            }, 10000);
         }
 
         async function loadAccuracy() {
@@ -1653,6 +1670,9 @@
                     headers: authHeaders(),
                     body: JSON.stringify({ action, duration_seconds: pomoMode === 'focus' ? pomoRemaining : 0 })
                 });
+                loadTwinData();
+                loadCurrentApp();
+                loadAICoach();
                 loadBlockerStatus();
             } catch(e) {
                 console.error('syncPomodoroFocusLock error', e);
@@ -2017,12 +2037,12 @@
             }, 3000);
         }
 
-        // Auto-refresh blocker status every 15s when panel is visible
+        // Auto-refresh blocker status frequently while the page is visible
         setInterval(() => {
-            if (document.getElementById('view-blocker')?.classList.contains('active')) {
+            if (!document.hidden) {
                 loadBlockerStatus();
             }
-        }, 15000);
+        }, 5000);
         // Init
         renderPomoTime();
         updatePomoRing();
