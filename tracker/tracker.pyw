@@ -47,8 +47,10 @@ blocker_state = {
     "threshold":         70,
     "sites":             [],
     "currently_blocked": False,
+    "would_block_now":   False,
     "grace_until":       None,
     "focus_lock_until":  None,
+    "focus_lock_active": False,
     "focus_lock_reason": None,
     "last_config_fetch": None,
     "config_ttl_secs":   5,
@@ -60,6 +62,10 @@ app_classification_state = {
     "ttl_secs": 30,
     "last_blocked_title": "",
     "last_blocked_at": None,
+}
+distraction_watch_state = {
+    "active_since": None,
+    "last_alert_at": None,
 }
 FALLBACK_DISTRACTING_KEYWORDS = [
     "instagram",
@@ -586,7 +592,7 @@ def fetch_blocker_config(token: str):
     try:
         res = authorized_request(
             "GET",
-            "/blocker/config",
+            "/blocker/status",
             token=token,
             timeout=8
         )
@@ -597,6 +603,8 @@ def fetch_blocker_config(token: str):
             blocker_state["enabled"]   = data.get("enabled", True)
             blocker_state["threshold"] = data.get("risk_threshold", 70)
             blocker_state["sites"]     = data.get("sites", [])
+            blocker_state["currently_blocked"] = bool(data.get("currently_blocked", False))
+            blocker_state["would_block_now"] = bool(data.get("would_block_now", False))
             grace_str = data.get("grace_until")
             if grace_str:
                 try:
@@ -613,10 +621,14 @@ def fetch_blocker_config(token: str):
                     blocker_state["focus_lock_until"] = None
             else:
                 blocker_state["focus_lock_until"] = None
+            blocker_state["focus_lock_active"] = bool(data.get("focus_lock_active", False))
             blocker_state["focus_lock_reason"] = data.get("focus_lock_reason")
             blocker_state["last_config_fetch"] = datetime.now()
-            print(f"[Blocker] Config synced — threshold: {blocker_state['threshold']}, "
-                  f"sites: {len(blocker_state['sites'])}, enabled: {blocker_state['enabled']}")
+            print(
+                f"[Blocker] Config synced — threshold: {blocker_state['threshold']}, "
+                f"sites: {len(blocker_state['sites'])}, enabled: {blocker_state['enabled']}, "
+                f"focus_lock: {blocker_state['focus_lock_active']}, would_block: {blocker_state['would_block_now']}"
+            )
     except Exception as e:
         print(f"[Blocker] Config fetch error: {e}")
 
@@ -742,7 +754,10 @@ def force_close_window(hwnd, pid, title: str):
 
 def enforce_focus_lock_process_block():
     focus_lock_until = blocker_state.get("focus_lock_until")
-    if not (focus_lock_until and datetime.now() < focus_lock_until):
+    focus_lock_active = bool(blocker_state.get("focus_lock_active")) or bool(
+        focus_lock_until and datetime.now() < focus_lock_until
+    )
+    if not focus_lock_active:
         return
 
     running = set(list_running_processes())
@@ -763,7 +778,10 @@ def enforce_focus_lock_process_block():
 
 def enforce_focus_lock_app_block(token: str):
     focus_lock_until = blocker_state.get("focus_lock_until")
-    if not (focus_lock_until and datetime.now() < focus_lock_until):
+    focus_lock_active = bool(blocker_state.get("focus_lock_active")) or bool(
+        focus_lock_until and datetime.now() < focus_lock_until
+    )
+    if not focus_lock_active:
         return
 
     fetch_app_classifications(token)
@@ -869,7 +887,9 @@ atexit.register(cleanup_on_exit)
 
 def evaluate_blocker(token: str, risk_score: int):
     focus_lock_until = blocker_state.get("focus_lock_until")
-    focus_lock_active = bool(focus_lock_until and datetime.now() < focus_lock_until)
+    focus_lock_active = bool(blocker_state.get("focus_lock_active")) or bool(
+        focus_lock_until and datetime.now() < focus_lock_until
+    )
 
     if not blocker_state["enabled"] and not focus_lock_active:
         if blocker_state["currently_blocked"]:
@@ -896,7 +916,11 @@ def evaluate_blocker(token: str, risk_score: int):
 
     threshold = blocker_state["threshold"]
     sites = blocker_state["sites"]
-    should_block = bool(sites) and (focus_lock_active or risk_score >= threshold)
+    should_block = bool(sites) and (
+        focus_lock_active
+        or blocker_state.get("would_block_now")
+        or risk_score >= threshold
+    )
     status_reason = (
         f"Pomodoro focus lock until {focus_lock_until.strftime('%H:%M:%S')}"
         if focus_lock_active and focus_lock_until
@@ -1274,11 +1298,37 @@ def send_activity(token, app_name, duration_seconds):
             f"Focus: {response_data.get('focus_level','?')} | "
             f"Type: {activity_type}"
         )
+        maybe_trigger_local_distraction_alert(activity_type, duration_seconds)
         return "SUCCESS", response_data
 
     except Exception as e:
         print(f"⚠️ Server not reachable: {e}")
         return "ERROR", None
+
+
+def maybe_trigger_local_distraction_alert(activity_type: str, duration_seconds: int):
+    now = datetime.now()
+    if activity_type == "distracting":
+        if distraction_watch_state["active_since"] is None:
+            distraction_watch_state["active_since"] = now - timedelta(seconds=duration_seconds)
+        minutes = (now - distraction_watch_state["active_since"]).total_seconds() / 60
+        last_alert_at = distraction_watch_state.get("last_alert_at")
+        can_alert = not last_alert_at or (now - last_alert_at).total_seconds() >= 300
+        if minutes >= 20 and can_alert:
+            distraction_watch_state["last_alert_at"] = now
+            msg = (
+                f"Continuous distraction detected for {int(minutes)} minutes.\n\n"
+                "Close distracting apps/websites and get back to focus mode."
+            )
+            print(f"[Alert] Local distraction alert triggered at {int(minutes)} minutes.")
+            threading.Thread(target=show_attractive_alert, args=(msg,), daemon=True).start()
+            send_whatsapp_tracker_async(
+                f"*Distraction Alert*\n\n"
+                f"You have been on distracting apps/sites for about *{int(minutes)} minutes*.\n"
+                f"Switch back to focused work now."
+            )
+    else:
+        distraction_watch_state["active_since"] = None
 
 
 # ─────────────────────────────────────────────

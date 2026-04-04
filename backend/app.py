@@ -95,6 +95,8 @@ def parse_local_datetime_string(raw_value):
         return None
     if isinstance(raw_value, datetime):
         dt_value = raw_value
+        if dt_value.tzinfo is None:
+            return dt_value.replace(tzinfo=UTC_TZ).astimezone(APP_TZ)
     else:
         text = str(raw_value).strip()
         if not text:
@@ -2121,6 +2123,12 @@ def get_blocker_config():
             "focus_lock_reason": None,
         }
         block_configs.insert_one({**doc})
+    else:
+        existing_sites = [s.strip().lower() for s in doc.get("sites", []) if isinstance(s, str) and s.strip()]
+        merged_sites = list(dict.fromkeys(existing_sites + DEFAULT_BLOCK_SITES))
+        if merged_sites != existing_sites:
+            block_configs.update_one({"email": email}, {"$set": {"sites": merged_sites}}, upsert=True)
+            doc["sites"] = merged_sites
     for key in ["blocked_at", "unblocked_at", "grace_until", "focus_lock_until", "focus_lock_started_at"]:
         if doc.get(key) and isinstance(doc[key], datetime):
             doc[key] = doc[key].strftime("%Y-%m-%d %H:%M:%S")
@@ -2232,21 +2240,27 @@ def pomodoro_focus_lock():
     if action == "start":
         duration_seconds = max(int(data.get("duration_seconds") or 25 * 60), 60)
         focus_lock_until = now + timedelta(seconds=duration_seconds)
+        focus_lock_started_at_str = format_local_time(now)
+        focus_lock_until_str = format_local_time(focus_lock_until)
+        existing_doc = block_configs.find_one({"email": email}, {"sites": 1}) or {}
+        existing_sites = [s.strip().lower() for s in existing_doc.get("sites", []) if isinstance(s, str) and s.strip()]
+        merged_sites = list(dict.fromkeys(existing_sites + DEFAULT_BLOCK_SITES))
         block_configs.update_one(
             {"email": email},
             {
                 "$set": {
-                    "focus_lock_started_at": now,
-                    "focus_lock_until": focus_lock_until,
+                    "focus_lock_started_at": focus_lock_started_at_str,
+                    "focus_lock_until": focus_lock_until_str,
                     "focus_lock_reason": "pomodoro_focus",
                     "grace_until": None,
+                    "sites": merged_sites,
                 }
             },
             upsert=True,
         )
         return jsonify({
             "msg": "Focus lock enabled.",
-            "focus_lock_until": format_local_time(focus_lock_until),
+            "focus_lock_until": focus_lock_until_str,
             "focus_lock_active": True,
         })
 
