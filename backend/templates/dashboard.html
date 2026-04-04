@@ -1285,15 +1285,19 @@
                 document.getElementById("uiDistOverall").innerText = `Overall: ${formatTime(overallDistSecs)}`;
                 document.getElementById("uiOverallFocus").innerText = `Overall: ${overallFocus}%`;
                 document.getElementById("uiRisk").innerText       = data.risk_score || 0;
-                const prodMins = Math.round(overallProdSecs / 60);
-                const distMins = Math.round(overallDistSecs / 60);
+                const prodMins = Math.round(prodSecs / 60);
+                const distMins = Math.round(distSecs / 60);
                 if (!donutChartObj) {
                     donutChartObj = new Chart(document.getElementById("donutChart"), {
                         type: "doughnut",
-                        data: { labels: ["Overall Productive", "Overall Distracting"], datasets: [{ data: [prodMins, distMins], backgroundColor: ["#10B981", "#F43F5E"] }] },
+                        data: { labels: ["Today Productive", "Today Distracting"], datasets: [{ data: [prodMins, distMins], backgroundColor: ["#10B981", "#F43F5E"] }] },
                         options: { responsive: true, maintainAspectRatio: false, cutout: '75%', plugins: { legend: { position: 'bottom', labels: { color: '#2E1065', font: {family: 'Poppins'} } } }, animation: { duration: 500 } }
                     });
-                } else { donutChartObj.data.datasets[0].data = [prodMins, distMins]; donutChartObj.update('none'); }
+                } else {
+                    donutChartObj.data.labels = ["Today Productive", "Today Distracting"];
+                    donutChartObj.data.datasets[0].data = [prodMins, distMins];
+                    donutChartObj.update('none');
+                }
             } catch(e) {}
         }
 

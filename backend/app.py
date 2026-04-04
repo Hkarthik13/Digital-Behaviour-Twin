@@ -1943,7 +1943,13 @@ def behaviour_heatmap():
 @jwt_required()
 def focus_timeline():
     email = get_jwt_identity()
-    logs = list(activities.find({"email": email}, {"_id": 0, "timestamp": 1, "type": 1, "duration": 1}).sort("timestamp", 1))
+    day_start = local_day_start_utc_naive()
+    logs = list(
+        activities.find(
+            {"email": email, "timestamp": {"$gte": day_start}},
+            {"_id": 0, "timestamp": 1, "type": 1, "duration": 1},
+        ).sort("timestamp", 1)
+    )
     if not logs:
         return jsonify([])
 
