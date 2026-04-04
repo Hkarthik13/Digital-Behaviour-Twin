@@ -9,6 +9,7 @@ import tkinter as tk
 import requests
 import atexit
 import base64
+import subprocess
 from datetime import datetime, timedelta
 from tkinter import messagebox
 
@@ -60,6 +61,21 @@ app_classification_state = {
     "last_blocked_title": "",
     "last_blocked_at": None,
 }
+FALLBACK_DISTRACTING_KEYWORDS = [
+    "instagram",
+    "youtube",
+    "facebook",
+    "twitter",
+    "x.com",
+    "netflix",
+    "reddit",
+    "tiktok",
+    "twitch",
+    "discord",
+    "whatsapp",
+    "telegram",
+    "steam",
+]
 
 HOSTS_FILE         = r"C:\Windows\System32\drivers\etc\hosts"
 HOSTS_MARKER_START = "# === Digital Behaviour Twin Blocker START ==="
@@ -606,10 +622,37 @@ def classify_window_title(title: str) -> str:
     for keyword in app_classification_state.get("distracting", []):
         if keyword and keyword in lower_title:
             return "distracting"
+    for keyword in FALLBACK_DISTRACTING_KEYWORDS:
+        if keyword in lower_title:
+            return "distracting"
     for keyword in app_classification_state.get("productive", []):
         if keyword and keyword in lower_title:
             return "productive"
     return "neutral"
+
+
+def force_close_window(hwnd, pid, title: str):
+    try:
+        import win32con
+        import win32gui
+        win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+    except Exception:
+        pass
+
+    if not pid:
+        return
+
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as e:
+        print(f"[AppBlock] taskkill failed for '{title[:60]}': {e}")
 
 
 def enforce_focus_lock_app_block(token: str):
@@ -618,7 +661,7 @@ def enforce_focus_lock_app_block(token: str):
         return
 
     fetch_app_classifications(token)
-    hwnd, title, _pid = get_active_window_details()
+    hwnd, title, pid = get_active_window_details()
     if not hwnd or not title:
         return
 
@@ -638,10 +681,7 @@ def enforce_focus_lock_app_block(token: str):
         return
 
     try:
-        import win32con
-        import win32gui
-        win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
-        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+        force_close_window(hwnd, pid, title)
         app_classification_state["last_blocked_title"] = title
         app_classification_state["last_blocked_at"] = now
         print(f"[AppBlock] Focus lock blocked distracting window: {title[:80]}")
@@ -1376,6 +1416,11 @@ if __name__ == "__main__":
         elapsed   = round((now - last_activity).total_seconds())
         last_activity = now
         duration  = max(5, min(elapsed, 60))
+        try:
+            fetch_blocker_config(token)
+            enforce_focus_lock_app_block(token)
+        except Exception as loop_block_err:
+            print(f"[AppBlock] Main-loop enforcement error: {loop_block_err}")
         status, _ = send_activity(token, app_name, duration)
         if status == "UNAUTHORIZED":
             print("🔄 Token expired — waiting for re-login...")
