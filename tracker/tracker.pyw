@@ -10,6 +10,7 @@ import requests
 import atexit
 import base64
 import subprocess
+import ctypes
 from datetime import datetime, timedelta
 from tkinter import messagebox
 
@@ -101,26 +102,26 @@ SAFE_BROWSER_PROCESS_NAMES = {
 }
 
 
-def list_running_processes():
+def _load_psutil():
     try:
-        result = subprocess.run(
-            ["tasklist", "/FO", "CSV", "/NH"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=8,
-        )
-        rows = []
-        for raw in (result.stdout or "").splitlines():
-            raw = raw.strip()
-            if not raw or "INFO:" in raw.upper():
-                continue
-            first = raw.strip('"').split('","')[0].strip().lower()
-            if first:
-                rows.append(first)
-        return rows
+        import psutil  # type: ignore
+        return psutil
     except Exception:
-        return []
+        return None
+
+
+def list_running_processes():
+    psutil = _load_psutil()
+    if psutil:
+        try:
+            return [
+                (proc.info.get("name") or "").strip().lower()
+                for proc in psutil.process_iter(["name"])
+                if (proc.info.get("name") or "").strip()
+            ]
+        except Exception:
+            pass
+    return []
 
 HOSTS_FILE         = r"C:\Windows\System32\drivers\etc\hosts"
 HOSTS_MARKER_START = "# === Digital Behaviour Twin Blocker START ==="
@@ -551,15 +552,11 @@ def _strip_blocker_section(content: str) -> str:
 
 def flush_dns_cache():
     try:
-        subprocess.run(
-            ["ipconfig", "/flushdns"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=8,
-        )
+        dnsapi = ctypes.windll.dnsapi
+        dnsapi.DnsFlushResolverCache()
     except Exception as e:
-        print(f"[Blocker] DNS flush error: {e}")
+        print(f"[Blocker] DNS flush skipped: {e}")
+    return
 
 
 def apply_block(sites: list) -> bool:
@@ -685,23 +682,13 @@ def get_active_window_details():
 def get_process_image_name(pid):
     if not pid:
         return ""
-    try:
-        result = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        line = (result.stdout or "").strip().splitlines()
-        if not line:
-            return ""
-        first = line[0].strip().strip('"')
-        if "INFO:" in first.upper():
-            return ""
-        return first.split('","')[0].strip().lower()
-    except Exception:
-        return ""
+    psutil = _load_psutil()
+    if psutil:
+        try:
+            return (psutil.Process(pid).name() or "").strip().lower()
+        except Exception:
+            pass
+    return ""
 
 
 def classify_window_title(title: str) -> str:
@@ -747,16 +734,19 @@ def force_close_window(hwnd, pid, title: str):
     if not pid:
         return
 
-    try:
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except Exception as e:
-        print(f"[AppBlock] taskkill failed for '{title[:60]}': {e}")
+    psutil = _load_psutil()
+    if psutil:
+        try:
+            proc = psutil.Process(pid)
+            for child in proc.children(recursive=True):
+                try:
+                    child.kill()
+                except Exception:
+                    pass
+            proc.kill()
+            return
+        except Exception:
+            pass
 
 
 def close_window_soft(hwnd, title: str):
@@ -782,15 +772,22 @@ def enforce_focus_lock_process_block():
 
     running = set(list_running_processes())
     targets = sorted(running.intersection(FALLBACK_DISTRACTING_PROCESS_NAMES))
+    psutil = _load_psutil()
+    if not psutil:
+        return
     for process_name in targets:
         try:
-            subprocess.run(
-                ["taskkill", "/IM", process_name, "/T", "/F"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
+            for proc in psutil.process_iter(["name"]):
+                if ((proc.info.get("name") or "").strip().lower() == process_name):
+                    try:
+                        for child in proc.children(recursive=True):
+                            try:
+                                child.kill()
+                            except Exception:
+                                pass
+                        proc.kill()
+                    except Exception:
+                        pass
             print(f"[AppBlock] Focus lock killed distracting process: {process_name}")
         except Exception as e:
             print(f"[AppBlock] Failed killing process {process_name}: {e}")
@@ -819,7 +816,7 @@ def enforce_focus_lock_app_block(token: str):
     process_name = get_process_image_name(pid)
     title_class = classify_window_title(title)
     if process_name in SAFE_BROWSER_PROCESS_NAMES:
-        if blocker_state.get("focus_lock_reason") != "distraction_penalty" or title_class != "distracting":
+        if title_class != "distracting":
             return
         now = datetime.now()
         if (
@@ -831,7 +828,7 @@ def enforce_focus_lock_app_block(token: str):
         close_window_soft(hwnd, title)
         app_classification_state["last_blocked_title"] = title
         app_classification_state["last_blocked_at"] = now
-        print(f"[AppBlock] Penalty lock closed distracting browser window: {title[:80]}")
+        print(f"[AppBlock] Focus lock closed distracting browser window: {title[:80]}")
         return
     process_class = classify_process_name(process_name)
     if title_class != "distracting" and process_class != "distracting":
