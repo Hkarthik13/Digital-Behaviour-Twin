@@ -100,6 +100,14 @@ SAFE_BROWSER_PROCESS_NAMES = {
     "iexplore.exe",
     "brave.exe",
 }
+BROWSER_TITLE_MARKERS = (
+    "microsoft edge",
+    "google chrome",
+    "mozilla firefox",
+    "opera",
+    "brave",
+    "browser",
+)
 
 
 def _load_psutil():
@@ -707,6 +715,14 @@ def classify_window_title(title: str) -> str:
     return "neutral"
 
 
+def is_browser_window(process_name: str, title: str) -> bool:
+    lower_title = (title or "").strip().lower()
+    lower_process = (process_name or "").strip().lower()
+    if lower_process in SAFE_BROWSER_PROCESS_NAMES:
+        return True
+    return any(marker in lower_title for marker in BROWSER_TITLE_MARKERS)
+
+
 def classify_process_name(process_name: str) -> str:
     lower_name = (process_name or "").strip().lower()
     if not lower_name:
@@ -815,20 +831,7 @@ def enforce_focus_lock_app_block(token: str):
 
     process_name = get_process_image_name(pid)
     title_class = classify_window_title(title)
-    if process_name in SAFE_BROWSER_PROCESS_NAMES:
-        if title_class != "distracting":
-            return
-        now = datetime.now()
-        if (
-            app_classification_state.get("last_blocked_title") == title
-            and app_classification_state.get("last_blocked_at")
-            and (now - app_classification_state["last_blocked_at"]).total_seconds() < 4
-        ):
-            return
-        close_window_soft(hwnd, title)
-        app_classification_state["last_blocked_title"] = title
-        app_classification_state["last_blocked_at"] = now
-        print(f"[AppBlock] Focus lock closed distracting browser window: {title[:80]}")
+    if is_browser_window(process_name, title):
         return
     process_class = classify_process_name(process_name)
     if title_class != "distracting" and process_class != "distracting":
@@ -1058,29 +1061,26 @@ def send_whatsapp_from_tracker(message: str) -> bool:
 
 
 def send_whatsapp_tracker_async(message: str):
-    threading.Thread(
-        target=send_whatsapp_from_tracker,
-        args=(message,),
-        daemon=True
-    ).start()
+    send_telegram_tracker_async(message)
 
 
 def send_telegram_from_tracker(message: str) -> bool:
     try:
         from dotenv import load_dotenv
-        load_dotenv(ENV_FILE)
+        load_dotenv(ENV_FILE, override=True)
     except:
         pass
 
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     if not bot_token or not chat_id:
+        print("[Telegram-Tracker] Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
         return False
 
     try:
         resp = requests.post(
             f"https://api.telegram.org/bot{bot_token}/sendMessage",
-            json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"},
+            json={"chat_id": chat_id, "text": message},
             timeout=15
         )
         if resp.status_code == 200 and resp.json().get("ok"):
@@ -1100,9 +1100,8 @@ def send_telegram_tracker_async(message: str):
         daemon=True
     ).start()
 
-
-send_whatsapp_from_tracker = send_telegram_from_tracker
-send_whatsapp_tracker_async = send_telegram_tracker_async
+def send_tracker_notification_async(message: str):
+    send_telegram_tracker_async(message)
 
 
 # ─────────────────────────────────────────────
