@@ -589,43 +589,136 @@ def call_free_ai(system_prompt: str, messages: list, max_tokens: int = 500) -> s
     last_user_msg = ""
     for m in reversed(messages):
         if m["role"] == "user":
-            last_user_msg = m["content"].lower()
+            last_user_msg = m["content"]
             break
 
+    reply_language = detect_study_buddy_language(last_user_msg)
     prod_mins, dist_mins, risk, focus_lvl = 0, 0, 0, "Unknown"
-    for line in system_prompt.split("\n"):
+    for line in system_prompt.splitlines():
         if "productive time" in line.lower():
-            try: prod_mins = int(''.join(filter(str.isdigit, line.split(":")[-1])))
-            except: pass
+            try:
+                prod_mins = int("".join(filter(str.isdigit, line.split(":")[-1])))
+            except Exception:
+                pass
         if "distracted time" in line.lower():
-            try: dist_mins = int(''.join(filter(str.isdigit, line.split(":")[-1])))
-            except: pass
+            try:
+                dist_mins = int("".join(filter(str.isdigit, line.split(":")[-1])))
+            except Exception:
+                pass
         if "risk score" in line.lower():
-            try: risk = int(''.join(filter(str.isdigit, line.split(":")[-1].split("/")[0])))
-            except: pass
+            try:
+                risk = int("".join(filter(str.isdigit, line.split(":")[-1].split("/")[0])))
+            except Exception:
+                pass
         if "focus level" in line.lower():
             focus_lvl = line.split(":")[-1].strip()
 
-    if any(w in last_user_msg for w in ["how am i", "doing", "status"]):
+    lower_msg = last_user_msg.lower()
+
+    status_queries = ["how am i", "how am i doing", "doing", "status", "epdi", "eppadi", "ippadi", "இப்போ", "எப்படி"]
+    plan_queries = ["plan", "study", "schedule", "kudu", "plan kudu", "திட்டம்", "பிளான்", "study plan"]
+
+    if any(w in lower_msg for w in status_queries) or any(w in last_user_msg for w in ["எப்படி", "இப்போ"]):
+        if reply_language == "tamil":
+            if risk > 60:
+                return (
+                    f"இப்போ உங்க risk score {risk}/100. இன்று {prod_mins} நிமிடம் productive, "
+                    f"{dist_mins} நிமிடம் distracted. கொஞ்சம் distracting apps இருந்து வெளியே வந்து "
+                    f"ஒரு short focus block start பண்ணுங்க."
+                )
+            if prod_mins > dist_mins:
+                return (
+                    f"நீங்க நல்லா பண்ணிக்கிட்டு இருக்கீங்க. இன்று {prod_mins} நிமிடம் productive, "
+                    f"{dist_mins} நிமிடம் distracted. Risk score {risk}/100. இதே momentum maintain பண்ணுங்க."
+                )
+            return (
+                f"இன்று {prod_mins} நிமிடம் productive, {dist_mins} நிமிடம் distracted. "
+                f"Focus level {focus_lvl}. ஒரு 25 நிமிட Pomodoro போட்டு restart பண்ணலாம்."
+            )
+        if reply_language == "tanglish":
+            if risk > 60:
+                return (
+                    f"Ippo un risk score {risk}/100. Inniku {prod_mins} mins productive, "
+                    f"{dist_mins} mins distracted. Konjam distracting apps close panni focus-ku thirumba va."
+                )
+            if prod_mins > dist_mins:
+                return (
+                    f"Nalla panra. Inniku {prod_mins} mins productive, {dist_mins} mins distracted. "
+                    f"Risk score {risk}/100. Idhe momentum maintain pannu."
+                )
+            return (
+                f"Inniku {prod_mins} mins productive, {dist_mins} mins distracted. "
+                f"Focus level {focus_lvl}. Oru 25 mins Pomodoro try pannu."
+            )
         if risk > 60:
-            return (f"⚠️ Your risk score is {risk}/100 — that's quite high! You've been productive for "
-                    f"{prod_mins} mins but distracted for {dist_mins} mins today. "
-                    f"Close those distracting tabs and get back on track. You can do this! 💪")
-        elif prod_mins > dist_mins:
-            return (f"🎯 You're doing great! {prod_mins} mins of focused work vs {dist_mins} mins distracted. "
-                    f"Risk score: {risk}/100. Keep this momentum going!")
-        else:
-            return (f"📊 Today: {prod_mins} mins productive, {dist_mins} mins distracted. "
-                    f"Your focus level is {focus_lvl}. Try a 25-minute Pomodoro session to boost your score!")
+            return (
+                f"Your risk score is {risk}/100, which is high. Today you have {prod_mins} productive minutes "
+                f"and {dist_mins} distracted minutes. Close the distracting tabs and restart with one short focus block."
+            )
+        if prod_mins > dist_mins:
+            return (
+                f"You're doing well. Today you have {prod_mins} productive minutes and {dist_mins} distracted minutes. "
+                f"Risk score: {risk}/100. Keep this momentum going."
+            )
+        return (
+            f"Today you have {prod_mins} productive minutes and {dist_mins} distracted minutes. "
+            f"Current focus level: {focus_lvl}. Try a 25-minute Pomodoro to reset."
+        )
 
-    if any(w in last_user_msg for w in ["plan", "study", "schedule"]):
-        return (f"📅 Here's a 2-hour plan:\n\n• 0:00–0:25 → Deep work block\n• 0:25–0:30 → Break ☕\n"
-                f"• 0:30–0:55 → Second focus block\n• 0:55–1:00 → Stretch 💧\n"
-                f"• 1:00–1:25 → Review\n• 1:25–1:30 → Break\n• 1:30–2:00 → Final sprint 🚀\n\n"
-                f"Risk: {risk}/100 — use Pomodoro timer!")
+    if any(w in lower_msg for w in plan_queries) or any(w in last_user_msg for w in ["திட்டம்", "பிளான்"]):
+        if reply_language == "tamil":
+            return (
+                "அடுத்த 2 மணி நேரத்துக்கு plan:\n\n"
+                "1. 0:00-0:25 -> deep work\n"
+                "2. 0:25-0:30 -> break\n"
+                "3. 0:30-0:55 -> second focus block\n"
+                "4. 0:55-1:00 -> stretch\n"
+                "5. 1:00-1:25 -> review\n"
+                "6. 1:25-1:30 -> break\n"
+                "7. 1:30-2:00 -> final sprint\n\n"
+                f"Risk {risk}/100. Pomodoro use பண்ணினா நல்ல flow வரும்."
+            )
+        if reply_language == "tanglish":
+            return (
+                "Next 2 hours ku plan:\n\n"
+                "1. 0:00-0:25 -> deep work\n"
+                "2. 0:25-0:30 -> break\n"
+                "3. 0:30-0:55 -> second focus block\n"
+                "4. 0:55-1:00 -> stretch\n"
+                "5. 1:00-1:25 -> review\n"
+                "6. 1:25-1:30 -> break\n"
+                "7. 1:30-2:00 -> final sprint\n\n"
+                f"Risk {risk}/100. Pomodoro use pannu."
+            )
+        return (
+            "Here is a 2-hour plan:\n\n"
+            "1. 0:00-0:25 -> Deep work block\n"
+            "2. 0:25-0:30 -> Break\n"
+            "3. 0:30-0:55 -> Second focus block\n"
+            "4. 0:55-1:00 -> Stretch\n"
+            "5. 1:00-1:25 -> Review\n"
+            "6. 1:25-1:30 -> Break\n"
+            "7. 1:30-2:00 -> Final sprint\n\n"
+            f"Risk {risk}/100. Use the Pomodoro timer to stay consistent."
+        )
 
-    return (f"🤖 Study Buddy here! {prod_mins} mins productive, {dist_mins} mins distracted (risk: {risk}/100).\n\n"
-            f"Ask: 'How am I doing?', 'Give me a study plan', or 'Motivate me'!")
+    if reply_language == "tamil":
+        return (
+            f"உங்க Study Buddy ready. இன்று {prod_mins} நிமிடம் productive, {dist_mins} நிமிடம் distracted "
+            f"(risk: {risk}/100).\n\n"
+            "நீங்க 'நான் எப்படி இருக்கேன்?', 'plan kudu', அல்லது 'motivate pannu'ன்னு கேக்கலாம்."
+        )
+    if reply_language == "tanglish":
+        return (
+            f"Un Study Buddy ready. Inniku {prod_mins} mins productive, {dist_mins} mins distracted "
+            f"(risk: {risk}/100).\n\n"
+            "Nee 'How am I doing?', 'plan kudu', illa 'motivate pannu' nu kelu."
+        )
+    return (
+        f"Study Buddy is ready. Today you have {prod_mins} productive minutes and {dist_mins} distracted minutes "
+        f"(risk: {risk}/100).\n\n"
+        "Ask things like 'How am I doing?', 'Give me a study plan', or 'Motivate me'."
+    )
 
 
 # ─────────────────────────────────────────────
@@ -2189,6 +2282,12 @@ Rules:
 - If the user is getting distracted, call out the exact distraction trend and suggest a concrete next step.
 - Keep replies practical, supportive, and short to medium length.
 - Never say you are Claude or any specific AI — you are their personal Study Buddy."""
+
+    system_prompt += (
+        f"\n- Understand Tamil, English, and Tanglish naturally."
+        f"\n- Match the user's language and writing style for this message."
+        f"\n- Reply language for this message: {reply_language}"
+    )
 
     messages = []
     for h in history[-10:]:
