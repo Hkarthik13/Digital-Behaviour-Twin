@@ -144,6 +144,70 @@ def compute_activity_totals(email: str):
     }
 
 
+def build_study_buddy_context(email: str):
+    now_local = local_now()
+    day_start = local_day_start_utc_naive(now_local)
+    recent_cutoff = (now_local - timedelta(hours=1)).astimezone(UTC_TZ).replace(tzinfo=None)
+
+    totals = compute_activity_totals(email)
+    today_logs = list(activities.find(
+        {"email": email, "timestamp": {"$gte": day_start}},
+        {"_id": 0, "app": 1, "type": 1, "duration": 1, "timestamp": 1}
+    ).sort("timestamp", -1))
+    recent_hour_logs = [log for log in today_logs if isinstance(log.get("timestamp"), datetime) and log["timestamp"] >= recent_cutoff]
+
+    recent_productive = sum(int(log.get("duration") or 0) for log in recent_hour_logs if log.get("type") == "productive")
+    recent_distracting = sum(int(log.get("duration") or 0) for log in recent_hour_logs if log.get("type") == "distracting")
+
+    top_distraction_map = defaultdict(int)
+    recent_apps = []
+    seen_apps = set()
+    for log in today_logs:
+        app_name = (log.get("app") or "Unknown App").strip()
+        if app_name and app_name not in seen_apps:
+            recent_apps.append(app_name)
+            seen_apps.add(app_name)
+        if log.get("type") == "distracting":
+            top_distraction_map[app_name] += int(log.get("duration") or 0)
+
+    top_distractions = [
+        {"app": app, "minutes": round(seconds / 60, 1)}
+        for app, seconds in sorted(top_distraction_map.items(), key=lambda item: item[1], reverse=True)[:3]
+    ]
+
+    goal_doc = goals.find_one({"email": email}) or {}
+    goal_minutes = int(goal_doc.get("daily_goal", 240) or 240)
+    goal_progress = min(100, round((totals["today_productive"] / (goal_minutes * 60)) * 100)) if goal_minutes > 0 else 0
+
+    risk_doc = risk_scores.find_one({"email": email}) or {}
+    ml_doc = ml_states.find_one({"email": email}) or {}
+    streak_summary = _compute_streak_summary(email)
+    focus_analysis = analyze_focus_patterns(email, activities)
+    best_focus_hour = None
+    if focus_analysis.get("best_focus_hours"):
+        best_focus_hour = focus_analysis["best_focus_hours"][0]
+
+    return {
+        "today_productive_mins": round(totals["today_productive"] / 60),
+        "today_distracting_mins": round(totals["today_distracting"] / 60),
+        "overall_productive_mins": round(totals["overall_productive"] / 60),
+        "overall_distracting_mins": round(totals["overall_distracting"] / 60),
+        "recent_productive_mins": round(recent_productive / 60),
+        "recent_distracting_mins": round(recent_distracting / 60),
+        "risk_score": int(risk_doc.get("risk_score", 0) or 0),
+        "focus_level": ml_doc.get("focus_level", "Unknown"),
+        "goal_minutes": goal_minutes,
+        "goal_progress_pct": goal_progress,
+        "current_streak": streak_summary.get("current_streak", 0),
+        "longest_streak": streak_summary.get("longest_streak", 0),
+        "recent_apps": recent_apps[:5],
+        "top_distractions": top_distractions,
+        "best_focus_hour": best_focus_hour,
+        "focus_summary": focus_analysis.get("summary", "Not enough focus data yet."),
+        "focus_confidence": focus_analysis.get("confidence", "low"),
+    }
+
+
 def admin_required(fn):
     @wraps(fn)
     @jwt_required()
@@ -2060,26 +2124,54 @@ def study_buddy_chat():
     history      = data.get("history", [])
     if not user_message:
         return jsonify({"error": "Message required"}), 400
-    twin_data  = twin.find_one({"email": email}) or {}
-    risk_data  = risk_scores.find_one({"email": email}) or {}
-    ml_data    = ml_states.find_one({"email": email}) or {}
-    goal_data  = goals.find_one({"email": email}) or {}
-    prod_mins  = round(twin_data.get("productive_time", 0) / 60)
-    dist_mins  = round(twin_data.get("distracting_time", 0) / 60)
-    risk       = risk_data.get("risk_score", 0)
-    focus_lvl  = ml_data.get("focus_level", "Unknown")
-    goal_mins  = goal_data.get("daily_goal", 240)
+    buddy_context = build_study_buddy_context(email)
+    prod_mins  = buddy_context["today_productive_mins"]
+    dist_mins  = buddy_context["today_distracting_mins"]
+    risk       = buddy_context["risk_score"]
+    focus_lvl  = buddy_context["focus_level"]
+    goal_mins  = buddy_context["goal_minutes"]
+    recent_prod = buddy_context["recent_productive_mins"]
+    recent_dist = buddy_context["recent_distracting_mins"]
+    goal_progress = buddy_context["goal_progress_pct"]
+    current_streak = buddy_context["current_streak"]
+    longest_streak = buddy_context["longest_streak"]
+    recent_apps = ", ".join(buddy_context["recent_apps"]) if buddy_context["recent_apps"] else "No recent apps yet"
+    top_distractions = ", ".join(
+        f"{item['app']} ({item['minutes']}m)" for item in buddy_context["top_distractions"]
+    ) if buddy_context["top_distractions"] else "No major distractions logged today"
+    best_focus_hour = buddy_context["best_focus_hour"]
+    best_focus_line = (
+        f"{best_focus_hour['label']} with score {best_focus_hour['score']}"
+        if best_focus_hour else "Not enough history yet"
+    )
     system_prompt = f"""You are an AI Study Buddy inside the Digital Behaviour Twin dashboard.
-You have real-time access to the user's productivity data:
+You have real-time access to the user's latest productivity data from tracked activities.
 
 - Productive time today : {prod_mins} minutes
 - Distracted time today : {dist_mins} minutes
+- Productive time in the last hour : {recent_prod} minutes
+- Distracted time in the last hour : {recent_dist} minutes
+- Overall productive time : {buddy_context["overall_productive_mins"]} minutes
+- Overall distracted time : {buddy_context["overall_distracting_mins"]} minutes
 - Current risk score    : {risk}/100
 - Current focus level   : {focus_lvl}
 - Daily goal            : {goal_mins} minutes
+- Goal progress today   : {goal_progress}%
+- Current streak        : {current_streak} days
+- Longest streak        : {longest_streak} days
+- Best focus window     : {best_focus_line}
+- Focus pattern summary : {buddy_context["focus_summary"]}
+- Focus confidence      : {buddy_context["focus_confidence"]}
+- Recent apps seen      : {recent_apps}
+- Top distractions today: {top_distractions}
 
-Use this data naturally in your responses. Be motivating, concise, and specific.
-Never say you are Claude or any specific AI — you are their personal Study Buddy."""
+Rules:
+- Always answer using the latest tracked data above, not generic advice.
+- If the user asks how they are doing, compare productive vs distracting time clearly.
+- If the user asks for a plan, use their best focus window, last-hour trend, and goal progress.
+- If the user is getting distracted, call out the exact distraction trend and suggest a concrete next step.
+- Keep replies practical, supportive, and short to medium length.
+- Never say you are Claude or any specific AI — you are their personal Study Buddy."""
 
     messages = []
     for h in history[-10:]:
@@ -2087,7 +2179,7 @@ Never say you are Claude or any specific AI — you are their personal Study Bud
     messages.append({"role": "user", "content": user_message})
     try:
         reply = call_free_ai(system_prompt, messages, max_tokens=500)
-        return jsonify({"reply": reply})
+        return jsonify({"reply": reply, "context": buddy_context})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
