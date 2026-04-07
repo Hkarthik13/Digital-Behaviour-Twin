@@ -12,3 +12,4 @@ scikit-learn>=1.5,<2.0
 joblib>=1.4,<2.0
 requests>=2.31,<3.0
 gunicorn>=22.0,<23.0
+psutil>=6.0,<7.0
