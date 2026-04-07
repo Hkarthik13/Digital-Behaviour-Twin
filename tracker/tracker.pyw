@@ -776,85 +776,14 @@ def close_window_soft(hwnd, title: str):
 
 
 def enforce_focus_lock_process_block():
-    grace = blocker_state.get("grace_until")
-    if blocker_state.get("grace_active") or (grace and datetime.now() < grace):
-        return
-    focus_lock_until = blocker_state.get("focus_lock_until")
-    focus_lock_active = bool(blocker_state.get("focus_lock_active")) or bool(
-        focus_lock_until and datetime.now() < focus_lock_until
-    )
-    if not focus_lock_active:
-        return
-
-    running = set(list_running_processes())
-    targets = sorted(running.intersection(FALLBACK_DISTRACTING_PROCESS_NAMES))
-    psutil = _load_psutil()
-    if not psutil:
-        return
-    for process_name in targets:
-        try:
-            for proc in psutil.process_iter(["name"]):
-                if ((proc.info.get("name") or "").strip().lower() == process_name):
-                    try:
-                        for child in proc.children(recursive=True):
-                            try:
-                                child.kill()
-                            except Exception:
-                                pass
-                        proc.kill()
-                    except Exception:
-                        pass
-            print(f"[AppBlock] Focus lock killed distracting process: {process_name}")
-        except Exception as e:
-            print(f"[AppBlock] Failed killing process {process_name}: {e}")
+    return
 
 
 def enforce_focus_lock_app_block(token: str):
-    grace = blocker_state.get("grace_until")
-    if blocker_state.get("grace_active") or (grace and datetime.now() < grace):
-        return
-    focus_lock_until = blocker_state.get("focus_lock_until")
-    focus_lock_active = bool(blocker_state.get("focus_lock_active")) or bool(
-        focus_lock_until and datetime.now() < focus_lock_until
-    )
-    if not focus_lock_active:
-        return
-
-    fetch_app_classifications(token)
-    hwnd, title, pid = get_active_window_details()
-    if not hwnd or not title:
-        return
-
-    lower_title = title.lower()
-    if "digital twin tracker login" in lower_title or "digital behaviour twin" in lower_title:
-        return
-
-    process_name = get_process_image_name(pid)
-    title_class = classify_window_title(title)
-    if is_browser_window(process_name, title):
-        return
-    process_class = classify_process_name(process_name)
-    if title_class != "distracting" and process_class != "distracting":
-        return
-
-    now = datetime.now()
-    if (
-        app_classification_state.get("last_blocked_title") == title
-        and app_classification_state.get("last_blocked_at")
-        and (now - app_classification_state["last_blocked_at"]).total_seconds() < 4
-    ):
-        return
-
-    try:
-        force_close_window(hwnd, pid, title)
-        app_classification_state["last_blocked_title"] = title
-        app_classification_state["last_blocked_at"] = now
-        print(f"[AppBlock] Focus lock blocked distracting window: {title[:80]} | process={process_name or 'unknown'}")
-    except Exception as e:
-        print(f"[AppBlock] Failed blocking window '{title[:60]}': {e}")
+    return
 
 
-def evaluate_blocker(token: str, risk_score: int):
+def legacy_evaluate_blocker(token: str, risk_score: int):
     if not blocker_state["enabled"]:
         if blocker_state["currently_blocked"]:
             remove_block()
@@ -1061,7 +990,11 @@ def send_whatsapp_from_tracker(message: str) -> bool:
 
 
 def send_whatsapp_tracker_async(message: str):
-    send_telegram_tracker_async(message)
+    threading.Thread(
+        target=send_telegram_from_tracker,
+        args=(message,),
+        daemon=True
+    ).start()
 
 
 def send_telegram_from_tracker(message: str) -> bool:
