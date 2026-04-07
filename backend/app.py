@@ -208,6 +208,22 @@ def build_study_buddy_context(email: str):
     }
 
 
+def detect_study_buddy_language(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return "english"
+    if any("\u0B80" <= ch <= "\u0BFF" for ch in raw):
+        return "tamil"
+    lower = raw.lower()
+    tanglish_markers = [
+        "enna", "epdi", "pannu", "venum", "iruku", "seri", "thaan", "inga",
+        "enna da", "eppadi", "pannalaam", "distractive", "productive", "ipo",
+    ]
+    if any(marker in lower for marker in tanglish_markers):
+        return "tanglish"
+    return "english"
+
+
 def admin_required(fn):
     @wraps(fn)
     @jwt_required()
@@ -2124,6 +2140,7 @@ def study_buddy_chat():
     history      = data.get("history", [])
     if not user_message:
         return jsonify({"error": "Message required"}), 400
+    reply_language = detect_study_buddy_language(user_message)
     buddy_context = build_study_buddy_context(email)
     prod_mins  = buddy_context["today_productive_mins"]
     dist_mins  = buddy_context["today_distracting_mins"]
