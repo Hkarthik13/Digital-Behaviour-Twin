@@ -1054,6 +1054,7 @@
         let donutChartObj = null, lineChartObj = null, barChartObj = null;
         let chatHistory = [];
         let isAdminUser = false;
+        let browserDeviceSyncWarned = false;
 
         function showToast(msg, type = 'success') {
             const t = document.getElementById('toastEl');
@@ -1101,6 +1102,11 @@
         function isMobile() { return window.innerWidth <= 768; }
 
         window.onload = async () => {
+            const logoutNotice = sessionStorage.getItem("logoutNotice");
+            if (logoutNotice) {
+                sessionStorage.removeItem("logoutNotice");
+                setTimeout(() => showToast(logoutNotice, "info"), 200);
+            }
             const token = localStorage.getItem("token");
             if (token) {
                 document.getElementById('auth-container').classList.add('hidden');
@@ -1125,7 +1131,10 @@
                             }, 500);
                         }
                     }
-                } catch(e) { console.error("Profile error", e); }
+                } catch(e) {
+                    console.error("Profile error", e);
+                    showToast("Failed to load your profile. Check server connection.", "danger");
+                }
             }
         };
 
@@ -1222,7 +1231,11 @@
         }
 
         async function logout() {
-            try { await fetch(`${API_URL}/auth/logout`, { method: "POST" }); } catch(e) {}
+            try {
+                const res = await fetch(`${API_URL}/auth/logout`, { method: "POST" });
+                const data = await res.json().catch(() => ({}));
+                if (data.msg) sessionStorage.setItem("logoutNotice", data.msg);
+            } catch(e) {}
             localStorage.removeItem("token");
             window.location.reload();
         }
@@ -1265,17 +1278,17 @@
 
         async function loadTwinData() {
             try {
-                const [summaryRes, recoRes] = await Promise.all([
+                const [summaryRes, liveRes] = await Promise.all([
                     fetch(`${API_URL}/twin/daily-summary`, { headers: authHeaders() }),
-                    fetch(`${API_URL}/twin/recommendation`, { headers: authHeaders() })
+                    fetch(`${API_URL}/twin/live-status`, { headers: authHeaders() })
                 ]);
-                if (summaryRes.status === 401 || summaryRes.status === 422 || recoRes.status === 401 || recoRes.status === 422) { logout(); return; }
+                if (summaryRes.status === 401 || summaryRes.status === 422 || liveRes.status === 401 || liveRes.status === 422) { logout(); return; }
                 const summary = await summaryRes.json();
-                const data = await recoRes.json();
+                const data = await liveRes.json();
                 const prodSecs = summary.productive_minutes || 0;
                 const distSecs = summary.distracting_minutes || 0;
-                const overallProdSecs = summary.overall_productive_minutes || data.overall_productive_time || 0;
-                const overallDistSecs = summary.overall_distracting_minutes || data.overall_distracting_time || 0;
+                const overallProdSecs = summary.overall_productive_minutes || data.productive_time || 0;
+                const overallDistSecs = summary.overall_distracting_minutes || data.distracting_time || 0;
                 const focus = summary.focus_score || 0;
                 const overallFocus = summary.overall_focus_score || 0;
                 document.getElementById("uiProd").innerText       = formatTime(prodSecs);
@@ -1484,10 +1497,21 @@
                 const dot  = document.getElementById('syncDot');
                 const text = document.getElementById('syncPillText');
                 const badge = document.getElementById('onlineDeviceBadge');
-                if (data.online_devices > 0) { dot.classList.remove('offline'); text.innerText = `${data.online_devices}/${data.total_devices} Synced`; }
-                else { dot.classList.add('offline'); text.innerText = 'No Devices'; }
-                if (data.online_devices > 0) { badge.style.display = 'block'; badge.innerText = data.online_devices; }
-                else { badge.style.display = 'none'; }
+                if (data.online_devices > 0) {
+                    dot.classList.remove('offline');
+                    text.innerText = `${data.online_devices}/${data.total_devices} Tracker Synced`;
+                    badge.style.display = 'block';
+                    badge.innerText = data.online_devices;
+                } else if (data.browser_viewers > 0) {
+                    dot.classList.remove('offline');
+                    text.innerText = `${data.browser_viewers} Browser Connected`;
+                    badge.style.display = 'block';
+                    badge.innerText = data.browser_viewers;
+                } else {
+                    dot.classList.add('offline');
+                    text.innerText = 'No Devices';
+                    badge.style.display = 'none';
+                }
             } catch(e) {}
         }
 
@@ -1497,24 +1521,57 @@
                 const deviceType = getDeviceTypeName();
                 const isMob      = /android|iphone|ipad/i.test(navigator.userAgent);
                 const deviceName = localStorage.getItem('myDeviceName') || (isMob ? `My ${deviceType === 'ios' ? 'iPhone' : 'Phone'} Browser` : `Browser (${deviceType})`);
-                await fetch(`${API_URL}/devices/register`, { method: 'POST', headers: authHeaders(), body: JSON.stringify({ device_id: deviceId, device_name: deviceName, device_type: deviceType }) });
-            } catch(e) {}
+                const res = await fetch(`${API_URL}/devices/register`, {
+                    method: 'POST',
+                    headers: authHeaders(),
+                    body: JSON.stringify({
+                        device_id: deviceId,
+                        device_name: deviceName,
+                        device_type: deviceType,
+                        tracks_activity: false,
+                        device_kind: 'browser'
+                    })
+                });
+                if (!res.ok && !browserDeviceSyncWarned) {
+                    browserDeviceSyncWarned = true;
+                    console.warn('Browser device registration failed');
+                }
+            } catch(e) {
+                console.warn('Browser device registration error', e);
+            }
         }
 
         async function sendBrowserHeartbeat() {
             try {
                 const deviceId = getBrowserDeviceId();
-                await fetch(`${API_URL}/devices/heartbeat`, { method: 'POST', headers: authHeaders(), body: JSON.stringify({ device_id: deviceId, productive_delta: 0, distracting_delta: 0 }) });
-            } catch(e) {}
+                const res = await fetch(`${API_URL}/devices/heartbeat`, { method: 'POST', headers: authHeaders(), body: JSON.stringify({ device_id: deviceId, productive_delta: 0, distracting_delta: 0 }) });
+                if (res.status === 404) {
+                    await autoRegisterBrowserDevice();
+                } else if ((res.status === 401 || res.status === 422) && localStorage.getItem("token")) {
+                    logout();
+                }
+            } catch(e) {
+                console.warn('Browser heartbeat error', e);
+            }
         }
 
         async function registerThisDevice() {
             const name = document.getElementById('newDeviceName').value.trim();
             const type = document.getElementById('newDeviceType').value;
             if (!name) { showToast("Device name enter பண்ணு", "danger"); return; }
-            const deviceId = getBrowserDeviceId() + '-' + Date.now();
+            const deviceId = getBrowserDeviceId();
             try {
-                const res  = await fetch(`${API_URL}/devices/register`, { method: 'POST', headers: authHeaders(), body: JSON.stringify({ device_id: deviceId, device_name: name, device_type: type }) });
+                const res  = await fetch(`${API_URL}/devices/register`, {
+                    method: 'POST',
+                    headers: authHeaders(),
+                    body: JSON.stringify({
+                        device_id: deviceId,
+                        device_name: name,
+                        device_type: type,
+                        tracks_activity: false,
+                        device_kind: 'browser'
+                    })
+                });
                 const data = await res.json();
                 if (res.ok) { showToast(`✅ "${name}" registered!`, "success"); document.getElementById('newDeviceName').value = ''; localStorage.setItem('myDeviceName', name); loadDevices(); }
                 else { showToast(data.error || "Registration failed", "danger"); }
@@ -1542,7 +1599,8 @@
                 container.innerHTML = '';
                 deviceList.forEach(d => {
                     const isOnline   = d.is_online;
-                    const contribPct = syncData.total_productive > 0 ? Math.round((d.today_productive / syncData.total_productive) * 100) : 0;
+                    const contribPct = d.tracks_activity && syncData.total_productive > 0 ? Math.round((d.today_productive / syncData.total_productive) * 100) : 0;
+                    const roleLabel = d.tracks_activity ? 'Tracking Device' : 'Browser View Only';
                     const card = document.createElement('div');
                     card.className = `device-card ${isOnline ? 'online' : 'offline'}`;
                     card.style.marginBottom = '12px';
@@ -1555,6 +1613,7 @@
                             </div>
                             <div class="device-meta">${d.device_type?.toUpperCase()} · ${d.last_seen || 'Never'}</div>
                             <div class="device-stats-row">
+                                <div class="device-stat-chip">${roleLabel}</div>
                                 <div class="device-stat-chip" style="color:var(--success);">✅ ${formatTime(d.today_productive || 0)}</div>
                                 <div class="device-stat-chip" style="color:var(--danger);">❌ ${formatTime(d.today_distracting || 0)}</div>
                                 <div class="device-stat-chip">📊 ${d.today_logs_count || 0} logs</div>

@@ -34,6 +34,7 @@ auth_state = {
     "access_token": None,
     "access_expires_at": None,
     "refresh_token": None,
+    "email": None,
 }
 auth_prompt_lock = threading.Lock()
 auth_prompt_state = {"active": False}
@@ -136,31 +137,42 @@ HOSTS_MARKER_START = "# === Digital Behaviour Twin Blocker START ==="
 HOSTS_MARKER_END   = "# === Digital Behaviour Twin Blocker END ==="
 
 
-def _decode_jwt_exp(token: str):
+def _decode_jwt_payload(token: str):
     try:
         parts = token.split(".")
         if len(parts) != 3:
             return None
         payload = parts[1]
         payload += "=" * (-len(payload) % 4)
-        data = json.loads(base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8"))
-        exp = data.get("exp")
-        return datetime.fromtimestamp(exp) if exp else None
+        return json.loads(base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8"))
     except Exception:
         return None
 
 
-def _load_refresh_token_from_disk():
-    if not os.path.exists(AUTH_STATE_FILE):
+def _decode_jwt_exp(token: str):
+    data = _decode_jwt_payload(token)
+    if not data:
         return None
+    exp = data.get("exp")
+    return datetime.fromtimestamp(exp) if exp else None
+
+
+def _load_auth_state_from_disk():
+    if not os.path.exists(AUTH_STATE_FILE):
+        return {"refresh_token": None, "email": None}
     try:
         with open(AUTH_STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         token = (data.get("refresh_token") or "").strip()
-        return token or None
+        email = (data.get("email") or "").strip().lower() or None
+        return {"refresh_token": token or None, "email": email}
     except Exception as e:
         print(f"[Auth] Could not read auth state: {e}")
-        return None
+        return {"refresh_token": None, "email": None}
+
+
+def _load_refresh_token_from_disk():
+    return _load_auth_state_from_disk().get("refresh_token")
 
 
 def _save_auth_state(refresh_token: str, email: str = ""):
@@ -176,21 +188,45 @@ def _save_auth_state(refresh_token: str, email: str = ""):
         print(f"[Auth] Could not save auth state: {e}")
 
 
-def _clear_auth_state():
+def _clear_auth_state(remove_persisted: bool = True):
     auth_state["access_token"] = None
     auth_state["access_expires_at"] = None
     auth_state["refresh_token"] = None
-    for path in (AUTH_STATE_FILE, LEGACY_TOKEN_FILE):
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-        except Exception:
-            pass
+    auth_state["email"] = None
+    if remove_persisted:
+        for path in (AUTH_STATE_FILE, LEGACY_TOKEN_FILE):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
 
 
 def _set_access_token(token: str):
     auth_state["access_token"] = token
     auth_state["access_expires_at"] = _decode_jwt_exp(token)
+    payload = _decode_jwt_payload(token) or {}
+    token_email = (payload.get("sub") or "").strip().lower()
+    if token_email:
+        auth_state["email"] = token_email
+
+
+def _sync_auth_state_with_disk():
+    disk_state = _load_auth_state_from_disk()
+    disk_email = disk_state.get("email")
+    disk_refresh_token = disk_state.get("refresh_token")
+    current_email = (auth_state.get("email") or "").strip().lower() or None
+    current_refresh_token = auth_state.get("refresh_token")
+
+    if disk_email and current_email and disk_email != current_email:
+        print(f"[Auth] Tracker account changed from {current_email} to {disk_email}. Refreshing session...")
+        _clear_auth_state(remove_persisted=False)
+
+    if disk_refresh_token and disk_refresh_token != current_refresh_token:
+        auth_state["refresh_token"] = disk_refresh_token
+
+    if disk_email and auth_state.get("email") != disk_email and not auth_state.get("access_token"):
+        auth_state["email"] = disk_email
 
 
 def _show_tracker_login_window():
@@ -458,21 +494,29 @@ def _prompt_tracker_login():
 
 
 def get_valid_access_token(force_refresh: bool = False):
+    _sync_auth_state_with_disk()
     now = datetime.now()
     current_token = auth_state.get("access_token")
     current_exp = auth_state.get("access_expires_at")
     if not force_refresh and current_token and current_exp and current_exp > (now + timedelta(seconds=30)):
         return current_token
 
-    refresh_token = _load_refresh_token_from_disk()
+    disk_state = _load_auth_state_from_disk()
+    refresh_token = disk_state.get("refresh_token")
     auth_state["refresh_token"] = refresh_token
+    if disk_state.get("email"):
+        auth_state["email"] = disk_state["email"]
     if not refresh_token:
         auth_state["access_token"] = None
         auth_state["access_expires_at"] = None
+        auth_state["email"] = None
         if not force_refresh:
             _prompt_tracker_login()
-            refresh_token = _load_refresh_token_from_disk()
+            disk_state = _load_auth_state_from_disk()
+            refresh_token = disk_state.get("refresh_token")
             auth_state["refresh_token"] = refresh_token
+            if disk_state.get("email"):
+                auth_state["email"] = disk_state["email"]
             if refresh_token:
                 return get_valid_access_token(force_refresh=True)
         return None

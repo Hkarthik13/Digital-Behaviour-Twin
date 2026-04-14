@@ -4,11 +4,12 @@ import threading
 import platform
 import hashlib
 import secrets
+import tempfile
 import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 
-from flask import Flask, request, jsonify, render_template, send_file
+from flask import Flask, request, jsonify, render_template, send_file, after_this_request
 from flask_cors import CORS
 from pymongo import MongoClient
 import pandas as pd
@@ -16,7 +17,7 @@ import numpy as np
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_jwt_extended import (
     JWTManager, create_access_token, create_refresh_token,
-    jwt_required, get_jwt_identity
+    jwt_required, get_jwt_identity, verify_jwt_in_request
 )
 from datetime import timedelta, datetime
 from functools import wraps
@@ -63,6 +64,12 @@ def get_admin_emails():
 
 def is_admin_email(email: str) -> bool:
     return (email or "").strip().lower() in get_admin_emails()
+
+
+def is_user_setup_complete(user_doc: dict) -> bool:
+    if not user_doc:
+        return False
+    return not user_doc.get("is_new_user", False) and bool(user_doc.get("consent_given", False))
 
 
 def as_local_time(dt_value):
@@ -235,6 +242,49 @@ def admin_required(fn):
         return fn(*args, **kwargs)
     return wrapper
 
+
+SETUP_EXEMPT_ENDPOINTS = {
+    "home",
+    "login_page",
+    "register",
+    "login",
+    "refresh_access_token",
+    "logout_backend",
+    "setup_user",
+    "profile",
+}
+
+
+@app.before_request
+def enforce_completed_setup():
+    if request.method == "OPTIONS":
+        return None
+
+    endpoint = (request.endpoint or "").strip()
+    if not endpoint or endpoint in SETUP_EXEMPT_ENDPOINTS or endpoint.startswith("static"):
+        return None
+
+    try:
+        verify_jwt_in_request(optional=True)
+    except Exception:
+        return None
+
+    email = get_jwt_identity()
+    if not email:
+        return None
+
+    user = users.find_one({"email": email}) or {}
+    if user.get("is_admin", False) or is_admin_email(email):
+        return None
+
+    if is_user_setup_complete(user):
+        return None
+
+    return jsonify({
+        "msg": "Complete setup and consent before using this feature.",
+        "setup_required": True,
+    }), 403
+
 def load_jwt_secret() -> str:
     configured_secret = os.getenv("JWT_SECRET_KEY", "").strip()
     if configured_secret and configured_secret != DEFAULT_JWT_SECRET_PLACEHOLDER:
@@ -327,11 +377,15 @@ scheduler.add_job(mark_offline_devices, "interval", minutes=2)
 scheduler.start()
 
 
-def persist_tracker_auth_state(refresh_token: str):
+def persist_tracker_auth_state(refresh_token: str, email: str = ""):
     try:
         os.makedirs(os.path.dirname(TRACKER_TOKEN_FILE), exist_ok=True)
         with open(TRACKER_TOKEN_FILE, "w", encoding="utf-8") as f:
-            json.dump({"refresh_token": refresh_token}, f)
+            json.dump({
+                "refresh_token": refresh_token,
+                "email": (email or "").strip().lower(),
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+            }, f)
         if os.path.exists(LEGACY_ACTIVE_TOKEN_FILE):
             os.remove(LEGACY_ACTIVE_TOKEN_FILE)
     except Exception as e:
@@ -875,6 +929,11 @@ def register_device():
     device_id   = data.get("device_id", "").strip()
     device_name = data.get("device_name", "Unknown Device").strip()
     device_type = data.get("device_type", "unknown").strip().lower()
+    tracks_activity = data.get("tracks_activity")
+    if tracks_activity is None:
+        tracks_activity = device_type not in {"web", "browser"}
+    tracks_activity = bool(tracks_activity)
+    device_kind = (data.get("device_kind") or ("tracker" if tracks_activity else "browser")).strip().lower()
     if not device_id:
         return jsonify({"error": "device_id required"}), 400
     existing = devices.find_one({"email": email, "device_id": device_id})
@@ -883,7 +942,8 @@ def register_device():
         devices.update_one(
             {"email": email, "device_id": device_id},
             {"$set": {"device_name": device_name, "device_type": device_type,
-                      "is_online": True, "last_heartbeat": now, "last_seen": now}}
+                      "is_online": True, "last_heartbeat": now, "last_seen": now,
+                      "tracks_activity": tracks_activity, "device_kind": device_kind}}
         )
         return jsonify({"msg": "Device updated", "device_id": device_id,
                         "device_name": device_name, "is_new": False})
@@ -896,7 +956,9 @@ def register_device():
             "device_type": device_type, "icon": get_device_icon(device_type),
             "is_online": True, "registered_at": now, "last_heartbeat": now,
             "last_seen": now, "total_productive_time": 0, "total_distracting_time": 0,
-            "is_primary": device_count == 0
+            "is_primary": device_count == 0,
+            "tracks_activity": tracks_activity,
+            "device_kind": device_kind,
         })
         sync_events.insert_one({"email": email, "event": "device_registered",
                                  "device_id": device_id, "device_name": device_name,
@@ -951,6 +1013,8 @@ def list_devices():
         d["today_productive"]  = sum(l["duration"] for l in today_logs if l["type"] == "productive")
         d["today_distracting"] = sum(l["duration"] for l in today_logs if l["type"] == "distracting")
         d["today_logs_count"]  = len(today_logs)
+        d["tracks_activity"] = d.get("tracks_activity", True)
+        d["device_kind"] = d.get("device_kind", "tracker" if d["tracks_activity"] else "browser")
     return jsonify({"devices": device_list, "total": len(device_list)})
 
 
@@ -1007,17 +1071,22 @@ def sync_summary():
     for d in device_list:
         did   = d.get("device_id", "")
         stats = per_device.get(did, {"productive": 0, "distracting": 0, "neutral": 0})
+        tracks_activity = d.get("tracks_activity", True)
         device_stats.append({
             "device_id": did, "device_name": d.get("device_name", "Unknown"),
             "device_type": d.get("device_type", "unknown"), "icon": d.get("icon", "🖥️"),
             "is_online": d.get("is_online", False),
+            "tracks_activity": tracks_activity,
+            "device_kind": d.get("device_kind", "tracker" if tracks_activity else "browser"),
             "productive": stats["productive"], "distracting": stats["distracting"],
             "contribution_pct": round(
                 (stats["productive"] / total_productive * 100) if total_productive > 0 else 0, 1)
         })
-    online_count = sum(1 for d in device_list if d.get("is_online"))
+    online_count = sum(1 for d in device_list if d.get("is_online") and d.get("tracks_activity", True))
+    browser_viewers = sum(1 for d in device_list if d.get("is_online") and not d.get("tracks_activity", True))
     return jsonify({"total_productive": total_productive, "total_distracting": total_distracting,
-                    "online_devices": online_count, "total_devices": len(device_list),
+                    "online_devices": online_count, "browser_viewers": browser_viewers,
+                    "total_devices": len(device_list),
                     "device_stats": device_stats, "last_sync": local_now().strftime("%H:%M:%S")})
 
 
@@ -1026,10 +1095,11 @@ def sync_summary():
 def sync_status():
     email = get_jwt_identity()
     total  = devices.count_documents({"email": email})
-    online = devices.count_documents({"email": email, "is_online": True})
+    online = devices.count_documents({"email": email, "is_online": True, "tracks_activity": {"$ne": False}})
+    browser_viewers = devices.count_documents({"email": email, "is_online": True, "tracks_activity": False})
     last_ev = sync_events.find_one({"email": email}, sort=[("timestamp", -1)])
     last_t  = format_local_time(last_ev["timestamp"], "%H:%M:%S") if last_ev else "Never"
-    return jsonify({"online_devices": online, "total_devices": total,
+    return jsonify({"online_devices": online, "browser_viewers": browser_viewers, "total_devices": total,
                     "last_sync": last_t, "synced": online > 0})
 
 
@@ -1069,15 +1139,27 @@ def update_twin(email, activity_type, duration, device_id=None):
     twin.update_one({"email": email}, update_query, upsert=True)
 
 def calculate_risk_score(email):
-    twin_data  = twin.find_one({"email": email})
-    if not twin_data: return 0
-    productive  = twin_data.get("productive_time", 0)
-    distracting = twin_data.get("distracting_time", 0)
-    total       = productive + distracting
-    if total == 0: return 0
-    base_risk   = (distracting / total) * 100
-    last_24h    = datetime.now() - timedelta(hours=24)
-    alert_count = alerts.count_documents({"email": email, "timestamp": {"$gte": last_24h}})
+    totals = compute_activity_totals(email)
+    productive = totals["today_productive"]
+    distracting = totals["today_distracting"]
+    total = productive + distracting
+    if total == 0:
+        risk_scores.update_one(
+            {"email": email},
+            {"$set": {
+                "email": email,
+                "risk_score": 0,
+                "window": "today",
+                "productive_seconds": productive,
+                "distracting_seconds": distracting,
+                "last_updated": datetime.now(),
+            }},
+            upsert=True,
+        )
+        return 0
+    base_risk = (distracting / total) * 100
+    day_start = local_day_start_utc_naive()
+    alert_count = alerts.count_documents({"email": email, "timestamp": {"$gte": day_start}})
     alert_penalty = min(alert_count * 2, 15)
     risk = base_risk + alert_penalty
     if productive > (distracting * 2): risk = min(risk, 30)
@@ -1085,7 +1167,14 @@ def calculate_risk_score(email):
     risk = min(round(risk), 100)
     risk_scores.update_one(
         {"email": email},
-        {"$set": {"email": email, "risk_score": risk, "last_updated": datetime.now()}},
+        {"$set": {
+            "email": email,
+            "risk_score": risk,
+            "window": "today",
+            "productive_seconds": productive,
+            "distracting_seconds": distracting,
+            "last_updated": datetime.now(),
+        }},
         upsert=True)
     return risk
 
@@ -1106,9 +1195,9 @@ def check_distraction_alert(email):
         
         user = users.find_one({"email": email}) or {}
         if user.get("whatsapp_alerts", True):
-            twin_data  = twin.find_one({"email": email}) or {}
-            prod_mins  = round(twin_data.get("productive_time", 0) / 60)
-            dist_mins  = round(twin_data.get("distracting_time", 0) / 60)
+            totals = compute_activity_totals(email)
+            prod_mins  = round(totals["today_productive"] / 60)
+            dist_mins  = round(totals["today_distracting"] / 60)
             wa_msg = (
                 f"🚨 *DISTRACTION ALERT*\n\n"
                 f"You've been distracted for *20+ minutes* straight!\n\n"
@@ -1123,15 +1212,18 @@ def check_distraction_alert(email):
 
 def detect_focus_session(email):
     recent_logs     = list(activities.find({"email": email}).sort("timestamp", -1).limit(320))
-    productive_logs = 0
+    focus_seconds = 0
     allowed_neutral = 3
     for log in recent_logs:
-        if log["type"] == "productive": productive_logs += 1
+        duration = max(int(log.get("duration") or 0), 0)
+        if log["type"] == "productive":
+            focus_seconds += duration
         elif log["type"] == "neutral" and allowed_neutral > 0:
             allowed_neutral -= 1
-            productive_logs += 1
-        else: break
-    productive_minutes = (productive_logs * 5) / 60
+            focus_seconds += duration
+        else:
+            break
+    productive_minutes = focus_seconds / 60
     if productive_minutes < 25: return 0
     last_session = focus_sessions.find_one({"email": email}, sort=[("timestamp", -1)])
     if last_session and (datetime.now() - last_session["timestamp"]).seconds < 1800: return 0
@@ -1295,7 +1387,6 @@ def login():
     refresh_token = create_refresh_token(identity=email)
     is_new = user.get("is_new_user", False)
     is_admin = user.get("is_admin", False) or is_admin_email(email)
-    persist_tracker_auth_state(refresh_token)
     return jsonify({
         "access_token": access_token,
         "refresh_token": refresh_token,
@@ -1313,8 +1404,7 @@ def refresh_access_token():
 
 @app.route("/auth/logout", methods=["POST"])
 def logout_backend():
-    clear_tracker_auth_state()
-    return jsonify({"msg": "Logged out"})
+    return jsonify({"msg": "Logged out. Tracker sessions on this device keep running until you sign out there."})
 
 @app.route("/auth/setup", methods=["POST"])
 @jwt_required()
@@ -1484,9 +1574,9 @@ def log_activity():
                 })
                 user = users.find_one({"email": email}) or {}
                 if user.get("whatsapp_alerts", True):
-                    twin_data  = twin.find_one({"email": email}) or {}
-                    prod_mins  = round(twin_data.get("productive_time", 0) / 60)
-                    dist_mins  = round(twin_data.get("distracting_time", 0) / 60)
+                    totals = compute_activity_totals(email)
+                    prod_mins  = round(totals["today_productive"] / 60)
+                    dist_mins  = round(totals["today_distracting"] / 60)
                     wa_msg = (
                         f"⚠️ *HIGH RISK ALERT — {risk}/100*\n\n"
                         f"Your distraction level is dangerously high!\n\n"
@@ -1603,18 +1693,19 @@ def live_status():
     ml_data   = ml_states.find_one({"email": email}, {"_id": 0})
     twin_data = twin.find_one({"email": email}, {"_id": 0})
     risk_data = risk_scores.find_one({"email": email}, {"_id": 0})
-    if not ml_data: return jsonify({"msg": "No ML state found"}), 404
     previous_state = ml_states.find_one({"email": email}, sort=[("last_updated", -1)], skip=1)
     trend = "Stable"
-    if previous_state:
+    if ml_data and previous_state:
         trend = "Improving" if ml_data.get("predicted_score", 0) > previous_state.get("predicted_score", 0) else "Declining"
     return jsonify({
-        "email": email, "focus_level": ml_data.get("focus_level"),
-        "predicted_score": ml_data.get("predicted_score"),
+        "email": email,
+        "focus_level": ml_data.get("focus_level", "Balanced") if ml_data else "Balanced",
+        "predicted_score": ml_data.get("predicted_score", 50) if ml_data else 50,
         "productive_time": twin_data.get("productive_time", 0) if twin_data else 0,
         "distracting_time": twin_data.get("distracting_time", 0) if twin_data else 0,
         "risk_score": risk_data.get("risk_score", 0) if risk_data else 0,
-        "trend": trend, "last_updated": ml_data.get("last_updated")
+        "trend": trend,
+        "last_updated": ml_data.get("last_updated") if ml_data else None
     })
 
 @app.route("/twin/focus-sessions")
@@ -2168,8 +2259,12 @@ def weekly_report():
     except:
         ai_feedback = "AI Insight unavailable. Focus on increasing your productive time."
 
-    file_path  = f"{email}_weekly_report.pdf"
-    graph_path = f"{email}_weekly_graph.png"
+    report_file = tempfile.NamedTemporaryFile(prefix="weekly_report_", suffix=".pdf", delete=False)
+    graph_file = tempfile.NamedTemporaryFile(prefix="weekly_graph_", suffix=".png", delete=False)
+    report_file.close()
+    graph_file.close()
+    file_path = report_file.name
+    graph_path = graph_file.name
     daily_data = {}
     for i in range(7):
         day_str = (last_week + timedelta(days=i)).strftime("%Y-%m-%d")
@@ -2220,6 +2315,17 @@ def weekly_report():
         Paragraph("Keep focusing! Consistency is the key to success.", normal_style)
     ]
     doc.build(elements)
+
+    @after_this_request
+    def cleanup_generated_files(response):
+        for path in (file_path, graph_path):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+        return response
+
     return send_file(file_path, as_attachment=True)
 
 
